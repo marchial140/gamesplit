@@ -5,10 +5,11 @@ import SwiftData
 struct GameSplitApp: App {
     var body: some Scene {
         WindowGroup { RootView() }
-            .modelContainer(for: [Club.self, Season.self, Player.self, MatchGame.self, StatEntry.self])
+            .modelContainer(for: [Club.self, Season.self, Player.self, MatchGame.self, StatEntry.self, Team.self])
     }
 }
 
+@MainActor
 struct RootView: View {
     @Query(sort: \Club.createdAt) private var clubs: [Club]
     @State private var showNewClub = false
@@ -35,6 +36,7 @@ struct RootView: View {
     }
 }
 
+@MainActor
 struct NewClubView: View {
     @Environment(\.modelContext) private var context
     @State private var saveError: String?
@@ -74,19 +76,21 @@ struct NewClubView: View {
     }
 }
 
+@MainActor
 struct ClubTabs: View {
     let club: Club
     var body: some View {
         TabView {
-            DashboardView(club: club).tabItem { Label("Accueil", systemImage: "house") }
-            PlayersView(club: club).tabItem { Label("Joueurs", systemImage: "person.3") }
+            DashboardView(club: club).tabItem { Label("Accueil", systemImage: "bolt.fill") }
             MatchesView(club: club).tabItem { Label("Matchs", systemImage: "sportscourt") }
-            StandingsView(club: club).tabItem { Label("Stats", systemImage: "chart.bar.xaxis") }
-            FinancesView(club: club).tabItem { Label("Coûts", systemImage: "dollarsign.circle") }
+            StandingsView(club: club).tabItem { Label("Classements", systemImage: "chart.bar.xaxis") }
+            TeamsView(club: club).tabItem { Label("Équipes", systemImage: "person.3.fill") }
+            LocalProfileView(club: club).tabItem { Label("Profil", systemImage: "person.crop.circle") }
         }
     }
 }
 
+@MainActor
 struct LabelValue: View {
     let label: String
     let value: String
@@ -98,6 +102,7 @@ struct LabelValue: View {
     }
 }
 
+@MainActor
 struct EmptyHint: View {
     let title: String
     let subtitle: String

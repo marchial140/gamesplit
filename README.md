@@ -1,50 +1,67 @@
-# GameSplit V1 — iPhone, flag / touch football
+# GameSplit V1.1 — profils, équipes et performances
 
-Application française SwiftUI + SwiftData, iOS 17+, entièrement locale. Pas de compte, serveur, banque, API tierce ou synchronisation cloud. Le champ `Club.sport` et les types de statistiques préparent une extension future ; seul le football est actif.
+Application native iPhone en français, SwiftUI + SwiftData, iOS 17+. Cette itération réalise la **priorité 1 locale** du [cahier V1.1](docs/V1_1_REQUIREMENTS.md), et prépare l’étape sociale sans simuler un service en ligne.
 
-## Exécution sur Mac
+## Ce qui est implémenté
 
-1. Installer Xcode 15+ et un simulateur iPhone iOS 17+.
-2. Ouvrir `GameSplit.xcodeproj`, choisir le schéma GameSplit et un simulateur, puis Product > Run.
-3. Exécuter `./scripts/test-ios.sh` (build puis XCTest). Pour imposer un simulateur : `GAMESPLIT_SIMULATOR_ID=<UDID> ./scripts/test-ios.sh`.
-4. Sur iPhone physique, sélectionner votre équipe Apple et un identifiant de bundle personnel dans Signing & Capabilities.
+- Navigation : **Accueil, Matchs, Classements, Équipes, Profil**. Cartes sportives bleu nuit/bleu électrique, photos, logos et badges de position.
+- Joueurs : photo locale redimensionnée, numéro facultatif, position principale et positions secondaires dont **Rusher**, OVR manuel 1–99, appartenance à plusieurs équipes. Les modifications conservent le même UUID et l’historique.
+- Fiches : statistiques saison/carrière, matchs, victoires, équipes, historique, meilleurs nombres de passes TD/TD en un match et partage textuel des performances. Profil permet de choisir sa fiche sur cet appareil ; **ce n’est pas un compte**.
+- Équipes : nom, logo, effectif modifiable et capitaines désignés ; calendrier, bilan V/D/N, points marqués/encaissés, statistiques collectives à partir des côtés historiques.
+- Matchs : calendrier/résultats, équipe préremplie depuis sa fiche, adversaire existant ou texte libre, sélection des présents, modification de date/lieu/adversaire. Mode match entre amis et équilibrage OVR conservés ; les positions QB secondaires participent à la séparation des QB.
+- Saisie : passes TD liées à leur réception, TD au sol, réception simple, interceptions défensives et lancées, conversions, verges par la passe/réception, réceptions hors TD, plaqués et sacs du quart. Les quantités se saisissent en une fois (1–10 000).
+- **Une passe TD = 4 points de contribution individuelle**, centralisés dans `ContributionRules`. Un TD réel vaut toujours les points configurés du match (6 par défaut). Les classements n’ajoutent jamais leurs points au score réel.
+- Classements filtrés par position et saison/carrière : TD, passes TD, interceptions, verges, réceptions, plaqués, sacks, contribution non officielle. Moins d’interceptions lancées se classe en premier pour cet indicateur.
+- Accueil : résultat des 30 derniers matchs terminés, leurs deux meilleurs contributeurs, accès aux profils et leaders par position de la semaine civile en cours. Les cartes sont dérivées des matchs : une correction met à jour la même carte sans republier un doublon. **Le fil est local, sans abonnements ou comptes partagés.**
+- Import CSV avec aperçu, confirmation, validation de tout le lot avant insertion et dédoublonnage saison/date à la minute/lieu/équipe/adversaire. Exemple : [examples/calendrier.csv](examples/calendrier.csv). Les présents se complètent dans le match après import.
+- Finances conservées, accessibles par **Équipes → Coûts et paiements — gestion**. Paiements manuels, rappels copiable/partageable, aucune banque.
+- Export JSON V2 couvrant photos, équipes et nouvelles statistiques, et import du format V1 conservé. Restauration uniquement dans une installation vide pour ne pas écraser les données. Limite 20 Mo ; le JSON contient des données personnelles en clair.
 
-Utiliser le checkout existant ; aucun worktree supplémentaire n’est nécessaire. Aucune dépendance applicative à installer.
+## Règles qui évitent les doubles comptes
 
-## Fonctionnalités
+Une passe et sa réception sont deux lignes d’un même événement. Saisir 4 passes TD avec un receveur produit 4 passes TD et 4 réceptions TD, soit **24 points d’équipe** avec les règles par défaut, pas 48. Les réceptions TD sont incluses dans le nombre de réceptions : la stat « Réception (hors TD) » sert aux autres attrapés. Les verges se saisissent séparément.
 
-- Groupe et première saison, effectif modifiable : nom, numéro, position et OVR 1–99.
-- Création de matchs, coût validé, sélection des présents, équilibrage des effectifs et OVR avec séparation des QB et amélioration par échanges. Ajustement manuel des équipes avant la première statistique.
-- Résultat officiel modifiable et statut terminé ; égalités acceptées.
-- Passe TD et réception liées : une seule attribution de points d’équipe. TD au sol, réception simple, interception et conversion. Points TD/conversion configurables par match.
-- À l’ajout d’une stat, choisir si ses points doivent être ajoutés au résultat. Pour les matchs terminés, cette option est désactivée par défaut afin de compléter les stats sans recompter le score.
-- Correction : supprimer l’événement puis le ressaisir. Une passe et sa réception sont supprimées ensemble. **La suppression ne modifie pas le résultat officiel** : corriger ses points dans Résultat si nécessaire. Les anciennes entrées sans identifiant d’événement restent indépendantes.
-- Équipes verrouillées après une statistique ou la fin du match pour préserver les historiques. Pour les corriger, supprimer les statistiques concernées et rouvrir le match ; vérifier ensuite le score.
-- Fiches carrière et saison, matchs et victoires ; classements TD, passes TD, interceptions et contribution GameSplit explicitement non officielle (TD marqué ×6, passe TD ×2, INT ×2, conversion ×1).
-- Nouvelles saisons sans effacer les anciennes ; partage du classement et du résultat via la feuille de partage iOS.
-- Coûts, paiements reçus cochés manuellement, reste à recevoir, rappel partageable ou copiable. Aucun paiement réel n’est déclenché.
-- Export JSON de toutes les données depuis Accueil > Sauvegarde. Import depuis l’accueil initial, **uniquement dans une base vide**, sans remplacement ni fusion. Format versionné, références et valeurs validées avant insertion ; sauvegarde atomique avec annulation en cas d’échec.
-- Sauvegardes SwiftData explicites et erreurs visibles. Pas de suppression de base ni migration destructive programmée.
+Chaque nouvelle saisie ajoute une performance. Pour corriger, supprimer l’événement puis saisir la version correcte. La suppression d’une passe supprime aussi sa réception. **La suppression de statistiques ne change pas le score officiel** : corriger le résultat si nécessaire et désactiver « Ajouter les points au score officiel » lors d’une ressaisie. Cette option est désactivée par défaut après la fin du match. Les anciens événements V1 sans liaison restent indépendants.
 
-## Vérifications effectuées dans cet environnement
+Les équipes/présents sont verrouillés après une stat ou la fin du match pour préserver les résultats. Les joueurs payés ne peuvent pas être retirés via l’éditeur des présents. Pour un match lié à une équipe, les Bleus correspondent à cette équipe et les Rouges à son adversaire ; vérifier les côtés avant de saisir des stats.
 
-Machine Linux sans `swift`, `xcodebuild`, SDK iOS ni simulateur : **aucune compilation iOS, aucun XCTest ni lancement de l’application n’a pu être effectué**. La compilabilité, le rendu, la migration SwiftData et la persistance sur appareil restent donc à confirmer sur Mac.
+## Tester sur Xcode
 
-Contrôles structurels exécutés avec succès : analyse de syntaxe de 9 fichiers Swift, lecture du projet Xcode, références et inclusion des sources, version de langage Swift et XML du schéma. Ces contrôles ne vérifient pas les types ni les API Apple. Le réglage `SWIFT_VERSION` a été corrigé de `5.9` à `5.0`, valeur du mode de langage Swift 5, compatible avec le compilateur Swift 5.9+.
+1. **Exporter la sauvegarde de votre V1 avant mise à jour.** Garder le même bundle identifier, sans désinstaller l’app, pour tester la migration.
+2. Ouvrir `GameSplit.xcodeproj` dans Xcode 15+, sélectionner GameSplit et un simulateur iPhone iOS 17+, puis ⌘R.
+3. Product → Test (⌘U), ou `./scripts/test-ios.sh`. Le script choisit un simulateur disponible ; `GAMESPLIT_SIMULATOR_ID=<UDID>` permet de le préciser.
+4. Sur iPhone réel, sélectionner votre équipe Apple dans Signing & Capabilities et activer le mode développeur si demandé. Aucun déploiement App Store n’est nécessaire.
+5. Suivre [la validation détaillée](docs/V1_1_VALIDATION.md), dont la mise à jour d’un store V1 existant, le retour après fermeture, les photos, les imports et les paiements.
 
-Pour reproduire ces contrôles facultatifs : installer `tree-sitter`, `tree-sitter-swift` et `openstep-parser` dans un environnement Python séparé, puis lancer `python scripts/review_project.py`.
+Aucune dépendance applicative à installer. Utiliser le checkout existant, sans worktree supplémentaire.
 
-8 tests XCTest sont fournis : encodage des identifiants, équilibrage impair, coût sans présents, 14 joueurs/2 QB et paiements 280/200/80, passe TD et correction groupée, interception/égalité/nouvelle saison, cas limites et règles, persistance sur disque après réouverture et export/import. **Ils sont écrits, pas exécutés ici.**
+## Vérification réellement effectuée ici
 
-## Limites V1
+**Linux sans Swift, Xcode, SDK Apple ni simulateur : aucun build iOS, XCTest, rendu ou test de migration n’a pu s’exécuter.** Le script iOS a été tenté et signale explicitement ce prérequis manquant (code 69). Les fonctionnalités ci-dessus sont implémentées dans les sources, leur exécution iOS reste à valider sur Mac.
 
-Un seul groupe par installation. Coûts stockés en Double et parts non arrondies avant affichage : une division non exacte peut afficher un écart de quelques cents entre parts affichées et total. Pas de fusion de sauvegardes ni de synchronisation entre appareils. Les sauvegardes JSON contiennent des données personnelles en clair : les conserver dans un emplacement de confiance. Import limité à 20 Mo.
+Contrôles structurels : syntaxe des 12 fichiers Swift, syntaxe Bash du script, projet Xcode OpenStep et schéma XML, références et inclusion des sources. Le fichier `FinancesView.swift` est identique à V1. Ces vérifications ne remplacent ni le contrôle des types Apple ni les tests fonctionnels.
 
-Tester sur iPhone les grandes tailles de texte, VoiceOver, petits écrans, claviers et feuille de partage. La compatibilité de migration depuis une éventuelle installation du prototype n’a pas été exécutée ; exporter les données avant toute mise à jour. Aucune promesse de validation iOS n’est faite sur la base de la seule revue statique.
+**14 méthodes XCTest** sont fournies : 8 critères V1, plus 6 tests V1.1 couvrant les 4 points individuels/6 points réels, quantités et corrections, positions secondaires, affiliations/photos et sauvegarde V2, import JSON V1 et CSV valide/invalide/idempotent. Ils ne sont pas déclarés réussis ici.
 
-## Vers une bêta TestFlight — sans publication automatique
+Les ajouts SwiftData sont optionnels ou possèdent des valeurs par défaut, sans renommage/suppression de champs. La migration automatique doit être testée sur une vraie base V1 ; un test de compatibilité JSON ne suffit pas.
 
-1. Sur Mac, réussir le build et les 8 XCTest avec le script fourni ; corriger tout diagnostic Apple restant.
-2. Tester les parcours complets sur simulateur puis sur iPhone : 14 joueurs, équipes, score, stats, paiements, deux saisons, fermeture/réouverture et restauration dans une installation de test vide.
-3. Vérifier l’accessibilité et fournir icône d’app, captures, identité de signature, identifiant final, politique de confidentialité et déclarations App Store Connect adaptées.
-4. Après autorisation explicite du propriétaire, préparer une archive signée et organiser la bêta TestFlight. Le dépôt GitHub contient le code source. Aucun envoi TestFlight ou dépôt App Store n’a été effectué.
+Contrôles facultatifs reproductibles : dans un environnement Python séparé, installer `tree-sitter`, `tree-sitter-swift`, `openstep-parser`, puis lancer `python scripts/review_project.py`.
+
+## Reporté et prochaines étapes sociales
+
+- **Comptes, invitations, synchronisation, profils distants, suivis et J’aime** : priorité 2, nécessitent backend, authentification et politiques serveur vérifiées. Les capitaines locaux ne sont pas des permissions de sécurité.
+- **Import .ics** : reporté ; CSV est implémenté et testable. Le parsing de récurrences/fuseaux et le dédoublonnage des UID doivent être traités correctement.
+- **Cartes de performance en image**, animations élaborées, comparaisons avancées, badges, historique/évolution OVR et Hall of Fame : ultérieurs. Le partage actuel est textuel.
+- Un seul groupe/organisation par installation ; plusieurs équipes à l’intérieur. Pas de fusion de sauvegardes, ni de synchronisation cloud. Parts monétaires conservées en Double comme en V1 : les arrondis affichés peuvent différer de quelques cents du total.
+
+L’approche retenue pour la prochaine étape est **Supabase** : identités stables, relations PostgreSQL, invitations transactionnelles, politiques RLS, stockage privé et cache SwiftData conservé. [Architecture, sécurité et configuration externe](docs/SOCIAL_BACKEND.md). Aucun compte externe ou backend n’a été créé.
+
+Avant TestFlight : réussir la compilation et les 14 tests sur Mac, valider la migration et l’accessibilité, profiler sur appareil, fournir icône définitive, identité de signature et informations de confidentialité. Publication uniquement après autorisation.
+
+## Fichiers principaux
+
+- `Models.swift` : modèle additif, équipes, statistiques, équilibrage et règles centralisées.
+- `SportUI.swift`, `PlayersView.swift`, `TeamsView.swift` : photos, profils, affiliations, capitaines et composants visuels.
+- `MatchesView.swift`, `CalendarImport.swift` : saisie, modifications, présents et import sans doublons.
+- `DashboardView.swift`, `StandingsView.swift` : activités locales et classements.
+- `Backup.swift`, `GameSplitTests.swift` : compatibilité des sauvegardes et tests.

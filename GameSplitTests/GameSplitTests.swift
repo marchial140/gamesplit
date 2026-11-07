@@ -101,7 +101,7 @@ final class AcceptanceTests: XCTestCase {
 
 @MainActor
 final class PersistenceTests: XCTestCase {
-    private var schema: Schema { Schema([Club.self, Season.self, Player.self, MatchGame.self, StatEntry.self]) }
+    private var schema: Schema { Schema([Club.self, Season.self, Player.self, MatchGame.self, StatEntry.self, Team.self]) }
     func testDiskReopenPreservesEditsAndBackupRoundtrip() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -140,5 +140,125 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(try destination.fetch(FetchDescriptor<MatchGame>()).first?.blueScore, 12)
         XCTAssertEqual(try destination.fetchCount(FetchDescriptor<StatEntry>()), 1)
         XCTAssertThrowsError(try backup.restore(context: destination))
+    }
+}
+
+@MainActor
+final class V11Tests: XCTestCase {
+    private func container() throws -> ModelContainer {
+        try ModelContainer(for: Club.self, Season.self, Player.self, MatchGame.self, StatEntry.self, Team.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+    func testFourIndividualPointsDoNotChangeSixTeamPoints() {
+        let player = Player(clubID: UUID(), name: "Alex", position: "QB")
+        let receiver = Player(clubID: player.clubID, name: "Max")
+        let game = MatchGame(clubID: player.clubID, seasonID: UUID(), date: .now, venue: "")
+        game.blueIDs = [player.id, receiver.id]
+        let entries = FootballEvents.make(game: game, kind: .passTD, playerID: player.id, receiverID: receiver.id, value: 4)
+        FootballEvents.applyScore(kind: .passTD, playerID: player.id, game: game, value: 4)
+        XCTAssertEqual(game.blueScore, 24)
+        let totals = Totals.byPlayer(games: [game], entries: entries)
+        XCTAssertEqual(totals[player.id]?.contributionPoints, 16)
+        XCTAssertEqual(totals[receiver.id]?.receivingTD, 4)
+        XCTAssertEqual(totals[receiver.id]?.receptions, 4)
+        entries[0].value = 2; entries[1].value = 2
+        XCTAssertEqual(Totals.forPlayer(player.id, games: [game], entries: entries).contributionPoints, 8)
+        XCTAssertEqual(game.blueScore, 24) // Explicit manual score correction, never stats-derived.
+    }
+    func testPositionStatisticsAndSecondaryQuarterback() {
+        let player = Player(clubID: UUID(), name: "Sam", position: "Rusher")
+        player.secondaryPositions = "QB,DB"
+        XCTAssertEqual(player.positions, ["Rusher", "QB", "DB"])
+        let otherQB = Player(clubID: player.clubID, name: "Alex", position: "QB")
+        let split = TeamsBalancer.split([player, otherQB])
+        XCTAssertEqual(split.blue.count, 1); XCTAssertEqual(split.red.count, 1)
+        let game = MatchGame(clubID: player.clubID, seasonID: UUID(), date: .now, venue: "")
+        game.blueIDs = [player.id]; game.isFinished = true
+        let kinds: [(StatKind, Int)] = [(.passingYards, 240), (.receivingYards, 83), (.reception, 5), (.tackle, 7), (.sack, 2), (.thrownInterception, 1)]
+        let entries = kinds.flatMap { FootballEvents.make(game: game, kind: $0.0, playerID: player.id, value: $0.1) }
+        let totals = Totals.forPlayer(player.id, games: [game], entries: entries)
+        XCTAssertEqual(totals.passingYards, 240); XCTAssertEqual(totals.receivingYards, 83)
+        XCTAssertEqual(totals.receptions, 5); XCTAssertEqual(totals.tackles, 7)
+        XCTAssertEqual(totals.sacks, 2); XCTAssertEqual(totals.thrownInterceptions, 1)
+        XCTAssertEqual(totals.contributionPoints, 0)
+        XCTAssertTrue(FootballEvents.make(game: game, kind: .sack, playerID: player.id, value: 0).isEmpty)
+    }
+    func testTeamsAndV11BackupRoundtrip() throws {
+        let source = try container(); let context = ModelContext(source)
+        let club = Club(name: "Communauté"); let season = Season(clubID: club.id, name: "2027")
+        let player = Player(clubID: club.id, name: "Sam", position: "Rusher")
+        player.secondaryPositions = "DB"; player.hasNumber = false; player.photoData = Data([1, 2, 3])
+        club.localProfileID = player.id
+        let first = Team(clubID: club.id, name: "Éclairs"), second = Team(clubID: club.id, name: "Lynx")
+        first.memberIDs = [player.id]; first.captainIDs = [player.id]; second.memberIDs = [player.id]
+        first.logoData = Data([4, 5])
+        context.insert(club); context.insert(season); context.insert(player); context.insert(first); context.insert(second)
+        let game = MatchGame(clubID: club.id, seasonID: season.id, date: .now, venue: "Parc")
+        game.teamID = first.id; game.opponentTeamID = second.id; game.blueIDs = [player.id]
+        game.blueScore = 20; game.redScore = 12; game.isFinished = true; context.insert(game)
+        try context.save()
+        let backup = try JSONDecoder().decode(LocalBackup.self, from: JSONEncoder().encode(LocalBackup(context: context)))
+        let destination = try container(); let target = ModelContext(destination)
+        try backup.restore(context: target)
+        let restored = try XCTUnwrap(target.fetch(FetchDescriptor<Player>()).first)
+        XCTAssertEqual(restored.photoData, player.photoData); XCTAssertFalse(restored.hasNumber)
+        XCTAssertEqual(restored.positions, ["Rusher", "DB"])
+        XCTAssertEqual(try target.fetch(FetchDescriptor<Club>()).first?.localProfileID, player.id)
+        let teams = try target.fetch(FetchDescriptor<Team>())
+        XCTAssertEqual(teams.filter { $0.memberIDs.contains(player.id) }.count, 2)
+        XCTAssertEqual(teams.first { $0.id == first.id }?.logoData, first.logoData)
+        let summary = TeamRecordSummary.calculate(teamID: first.id, games: [game])
+        XCTAssertEqual(summary.wins, 1); XCTAssertEqual(summary.pointsFor, 20)
+        XCTAssertEqual(TeamRecordSummary.calculate(teamID: second.id, games: [game]).losses, 1)
+    }
+    func testLegacyJSONStillImportsWithoutNewKeys() throws {
+        let source = try container(); let context = ModelContext(source)
+        let club = Club(name: "V1"); let season = Season(clubID: club.id, name: "2026")
+        let player = Player(clubID: club.id, name: "Max")
+        let game = MatchGame(clubID: club.id, seasonID: season.id, date: .now, venue: "")
+        game.blueIDs = [player.id]
+        context.insert(club); context.insert(season); context.insert(player); context.insert(game)
+        context.insert(StatEntry(matchID: game.id, playerID: player.id, kind: StatKind.receivingTD.rawValue))
+        try context.save()
+        let data = try JSONEncoder().encode(LocalBackup(context: context))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        json["version"] = 1; json.removeValue(forKey: "teams")
+        let additions = ["clubs": ["localProfileID"], "players": ["photoData", "hasNumber", "secondaryPositions"], "matchgames": ["teamID", "opponentTeamID", "opponentName"], "statentrys": ["value"]]
+        for (key, fields) in additions {
+            var records = try XCTUnwrap(json[key] as? [[String: Any]])
+            for index in records.indices { for field in fields { records[index].removeValue(forKey: field) } }
+            json[key] = records
+        }
+        let decoded = try JSONDecoder().decode(LocalBackup.self, from: JSONSerialization.data(withJSONObject: json))
+        let destination = try container(); let target = ModelContext(destination)
+        try decoded.restore(context: target)
+        XCTAssertEqual(try target.fetchCount(FetchDescriptor<Team>()), 0)
+        XCTAssertTrue(try XCTUnwrap(target.fetch(FetchDescriptor<Player>()).first).hasNumber)
+        XCTAssertEqual(try target.fetch(FetchDescriptor<StatEntry>()).first?.value, 1)
+    }
+    func testCSVQuotedFieldsAndInvalidInput() throws {
+        let rows = try CalendarCSV.parse("date,lieu,adversaire,equipe,cout\n2027-06-12T19:00:00-04:00,\"Parc, Nord\",Lynx,Éclairs,280\n")
+        XCTAssertEqual(rows.count, 1); XCTAssertEqual(rows[0].venue, "Parc, Nord"); XCTAssertEqual(rows[0].cost, 280)
+        XCTAssertThrowsError(try CalendarCSV.parse("lieu\nParc"))
+        XCTAssertThrowsError(try CalendarCSV.parse("date,cout\ninvalid,10"))
+        XCTAssertThrowsError(try CalendarCSV.parse("date,cout\n2027-06-12T19:00:00Z,-1"))
+        XCTAssertThrowsError(try CalendarCSV.parse("date,lieu\n2027-06-12T19:00:00Z,\"unclosed"))
+        let semicolon = try CalendarCSV.parse("date;cout\n2027-06-12T19:00:00Z;20,50")
+        XCTAssertEqual(semicolon.first?.cost, 20.5)
+    }
+    func testCalendarImportIsIdempotentAndValidatesWholeBatch() throws {
+        let source = try container(); let context = ModelContext(source)
+        let club = Club(name: "Amis"), team = Team(clubID: UUID(), name: "Éclairs")
+        team.clubID = club.id
+        let season = Season(clubID: club.id, name: "2027")
+        context.insert(club); context.insert(team); context.insert(season); try context.save()
+        let rows = try CalendarCSV.parse("date,equipe,adversaire\n2027-06-12T19:00:00Z,Éclairs,Lynx\n2027-06-12T19:00:00Z,Éclairs,Lynx")
+        let first = try CalendarImporter.run(rows: rows, clubID: club.id, seasonID: season.id, context: context)
+        XCTAssertEqual(first.added, 1); XCTAssertEqual(first.duplicates, 1)
+        let second = try CalendarImporter.run(rows: rows, clubID: club.id, seasonID: season.id, context: context)
+        XCTAssertEqual(second.added, 0); XCTAssertEqual(second.duplicates, 2)
+        let invalid = try CalendarCSV.parse("date,equipe\n2027-08-12T19:00:00Z,Éclairs\n2027-08-13T19:00:00Z,Inconnue")
+        XCTAssertThrowsError(try CalendarImporter.run(rows: invalid, clubID: club.id, seasonID: season.id, context: context))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MatchGame>()), 1)
     }
 }

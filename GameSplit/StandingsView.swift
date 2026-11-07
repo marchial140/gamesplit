@@ -1,25 +1,29 @@
 import SwiftUI
 import SwiftData
 
+@MainActor
 struct StandingsView: View {
     let club: Club
     @Query private var allPlayers: [Player]
     @Query private var allGames: [MatchGame]
     @Query private var allEntries: [StatEntry]
     @Query(sort: \Season.createdAt, order: .reverse) private var allSeasons: [Season]
+    @State private var positionFilter = "Toutes"
     @State private var metric = RankingMetric.contribution
     @State private var selectedSeason: UUID?
     @State private var showingNewSeason = false
-    private var players: [Player] { allPlayers.filter { $0.clubID == club.id } }
+    @State private var initialized = false
+    private var players: [Player] { allPlayers.filter { $0.clubID == club.id && (positionFilter == "Toutes" || $0.positions.contains(positionFilter)) } }
     private var seasons: [Season] { allSeasons.filter { $0.clubID == club.id } }
     private var games: [MatchGame] {
         allGames.filter { $0.clubID == club.id && (selectedSeason == nil || $0.seasonID == selectedSeason) }
     }
     private var ranks: [(player: Player, stats: PlayerTotals)] {
-        players.map { (player: $0, stats: Totals.forPlayer($0.id, games: games, entries: allEntries)) }
+        let totals = Totals.byPlayer(games: games, entries: allEntries)
+        return players.map { (player: $0, stats: totals[$0.id] ?? PlayerTotals()) }
             .sorted {
                 if metric.value($0.stats) != metric.value($1.stats) {
-                    return metric.value($0.stats) > metric.value($1.stats)
+                    return metric == .thrownInterceptions ? metric.value($0.stats) < metric.value($1.stats) : metric.value($0.stats) > metric.value($1.stats)
                 }
                 return $0.player.name < $1.player.name
             }
@@ -32,6 +36,7 @@ struct StandingsView: View {
         return "🏈 GameSplit — \(club.name) — \(seasonName)\n\(lines)"
     }
     var body: some View {
+        let ranked = ranks
         NavigationStack {
             List {
                 Section {
@@ -42,18 +47,25 @@ struct StandingsView: View {
                     Button { showingNewSeason = true } label: { Label("Créer une saison", systemImage: "plus.circle") }
                 }
                 Section {
+                    Picker("Position", selection: $positionFilter) {
+                        Text("Toutes").tag("Toutes")
+                        ForEach(Position.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
                     Picker("Classer par", selection: $metric) {
                         ForEach(RankingMetric.allCases) { Text($0.rawValue).tag($0) }
                     }
                 }
                 Section("Classement — \(metric.rawValue)") {
-                    if ranks.isEmpty { Text("Aucun joueur pour l'instant.").foregroundStyle(.secondary) }
-                    ForEach(ranks.indices, id: \.self) { i in
-                        let item = ranks[i]
+                    if ranked.isEmpty { Text("Aucun joueur pour l'instant.").foregroundStyle(.secondary) }
+                    ForEach(ranked.indices, id: \.self) { i in
+                        let item = ranked[i]
                         HStack(spacing: 12) {
+                            SportAvatar(data: item.player.photoData, name: item.player.name, size: 36)
                             Text("\(i + 1)").font(.headline).foregroundStyle(i == 0 ? Color.orange : Color.secondary).frame(width: 26)
                             VStack(alignment: .leading) {
-                                Text(item.player.name).font(.headline)
+                                NavigationLink {
+                                    PlayerDetailsView(player: item.player, games: allGames.filter { $0.clubID == club.id }, entries: allEntries)
+                                } label: { Text(item.player.name).font(.headline) }
                                 Text("\(item.player.position) • \(item.player.overall) OVR")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
@@ -67,7 +79,7 @@ struct StandingsView: View {
                     }
                 }
                 Section("Règles de calcul") {
-                    Text("TD marqués : 6 points • Passe TD : 2 points • Interception défensive : 2 points • Conversion : 1 point. Ce classement ludique n'est pas le score officiel des matchs.")
+                    Text("TD marqués : 6 points • Passe TD : \(ContributionRules.passingTouchdown) points • Interception défensive : 2 points • Conversion : 1 point. Ce classement ludique n'est pas le score officiel des matchs.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section {
@@ -76,8 +88,8 @@ struct StandingsView: View {
                     }
                 }
             }
-            .navigationTitle("Statistiques")
-            .onAppear { if selectedSeason == nil { selectedSeason = seasons.first?.id } }
+            .navigationTitle("Classements")
+            .onAppear { if !initialized { selectedSeason = seasons.first?.id; initialized = true } }
             .sheet(isPresented: $showingNewSeason, onDismiss: { selectedSeason = seasons.first?.id }) { NewSeasonView(clubID: club.id) }
         }
 
@@ -85,6 +97,7 @@ struct StandingsView: View {
     }
 }
 
+@MainActor
 struct NewSeasonView: View {
     let clubID: UUID
     @Environment(\.modelContext) private var context
@@ -121,6 +134,12 @@ enum RankingMetric: String, CaseIterable, Identifiable {
     case touchdowns = "TD marqués"
     case passing = "Passes TD"
     case interceptions = "Interceptions"
+    case passingYards = "Verges par la passe"
+    case receivingYards = "Verges de réception"
+    case receptions = "Réceptions"
+    case thrownInterceptions = "Interceptions lancées (moins = mieux)"
+    case tackles = "Plaqués"
+    case sacks = "Sacs du quart"
     var id: String { rawValue }
     func value(_ totals: PlayerTotals) -> Int {
         switch self {
@@ -128,6 +147,12 @@ enum RankingMetric: String, CaseIterable, Identifiable {
         case .touchdowns: return totals.touchdowns
         case .passing: return totals.passTD
         case .interceptions: return totals.interceptions
+        case .passingYards: return totals.passingYards
+        case .receivingYards: return totals.receivingYards
+        case .receptions: return totals.receptions
+        case .thrownInterceptions: return totals.thrownInterceptions
+        case .tackles: return totals.tackles
+        case .sacks: return totals.sacks
         }
     }
 }

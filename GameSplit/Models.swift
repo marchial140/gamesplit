@@ -5,6 +5,7 @@ import SwiftData
 @Model final class Club {
     var id: UUID
     var name: String
+    var localProfileID: UUID? = nil
     var sport: String
     var createdAt: Date
     init(name: String, sport: String = "football") {
@@ -26,6 +27,11 @@ import SwiftData
     var id: UUID
     var clubID: UUID
     var name: String
+    @Attribute(.externalStorage) var photoData: Data? = nil
+    var secondaryPositions: String = ""
+    var hasNumber: Bool = true
+    // Reserved for a verified server association; never populated by a local login.
+    var accountID: UUID? = nil
     var position: String
     var number: Int
     var overall: Int
@@ -36,11 +42,38 @@ import SwiftData
     }
 }
 
+@Model final class Team {
+    var id: UUID
+    var clubID: UUID
+    var name: String
+    var memberPlayerIDs: String = ""
+    var captainPlayerIDs: String = ""
+    @Attribute(.externalStorage) var logoData: Data? = nil
+    var createdAt: Date
+    init(clubID: UUID, name: String) { id = UUID(); self.clubID = clubID; self.name = name; createdAt = .now }
+    var memberIDs: Set<UUID> {
+        get { IDList.decode(memberPlayerIDs) }
+        set { memberPlayerIDs = IDList.encode(newValue) }
+    }
+    var captainIDs: Set<UUID> {
+        get { IDList.decode(captainPlayerIDs) }
+        set { captainPlayerIDs = IDList.encode(newValue) }
+    }
+}
+
+extension Player {
+    var positions: Set<String> { Set(secondaryPositions.split(separator: ",").map(String.init)).union([position]) }
+    var positionLabel: String { ([position] + positions.subtracting([position]).sorted()).joined(separator: " / ") }
+}
+
 @Model final class MatchGame {
     var id: UUID
     var clubID: UUID
     var seasonID: UUID
     var date: Date
+    var teamID: UUID? = nil
+    var opponentTeamID: UUID? = nil
+    var opponentName: String = ""
     var venue: String
     var bluePlayerIDs: String
     var redPlayerIDs: String
@@ -78,6 +111,7 @@ import SwiftData
 
 @Model final class StatEntry {
     var id: UUID
+    var value: Int = 1
     var eventID: UUID? = nil
     var matchID: UUID
     var playerID: UUID
@@ -99,7 +133,7 @@ enum IDList {
 }
 
 enum Position: String, CaseIterable, Identifiable {
-    case QB, WR, RB, DB, FLEX
+    case QB, WR, RB, DB, Rusher, FLEX
     var id: String { rawValue }
 }
 
@@ -109,6 +143,12 @@ enum StatKind: String, CaseIterable, Identifiable {
     case rushingTD = "rushing_td"
     case interception = "interception"
     case conversion = "conversion"
+    case passingYards = "passing_yards"
+    case receivingYards = "receiving_yards"
+    case thrownInterception = "thrown_interception"
+    case reception = "reception"
+    case tackle = "tackle"
+    case sack = "sack"
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -117,6 +157,12 @@ enum StatKind: String, CaseIterable, Identifiable {
         case .rushingTD: "Course TD"
         case .interception: "Interception défensive"
         case .conversion: "Conversion réussie"
+        case .passingYards: "Verges par la passe"
+        case .receivingYards: "Verges de réception"
+        case .thrownInterception: "Interception lancée"
+        case .reception: "Réception (hors TD)"
+        case .tackle: "Plaqué"
+        case .sack: "Sac du quart"
         }
     }
 }
@@ -127,35 +173,54 @@ struct PlayerTotals {
     var rushingTD = 0
     var interceptions = 0
     var conversions = 0
+    var passingYards = 0
+    var receivingYards = 0
+    var thrownInterceptions = 0
+    var receptions = 0
+    var tackles = 0
+    var sacks = 0
     var appearances = 0
     var wins = 0
     var touchdowns: Int { receivingTD + rushingTD }
-    var contributionPoints: Int { touchdowns * 6 + passTD * 2 + interceptions * 2 + conversions }
+    var contributionPoints: Int { ContributionRules.points(self) }
 }
 
 enum Totals {
     static func forPlayer(_ id: UUID, games: [MatchGame], entries: [StatEntry]) -> PlayerTotals {
-        var total = PlayerTotals()
+        byPlayer(games: games, entries: entries)[id] ?? PlayerTotals()
+    }
+    static func byPlayer(games: [MatchGame], entries: [StatEntry]) -> [UUID: PlayerTotals] {
+        var result: [UUID: PlayerTotals] = [:]
         let gameIDs = Set(games.map(\.id))
-        for entry in entries where entry.playerID == id && gameIDs.contains(entry.matchID) {
+        for entry in entries where gameIDs.contains(entry.matchID) {
+            var total = result[entry.playerID] ?? PlayerTotals()
             switch entry.kind {
-            case StatKind.passTD.rawValue: total.passTD += 1
-            case StatKind.receivingTD.rawValue: total.receivingTD += 1
-            case StatKind.rushingTD.rawValue: total.rushingTD += 1
-            case StatKind.interception.rawValue: total.interceptions += 1
-            case StatKind.conversion.rawValue: total.conversions += 1
+            case StatKind.passTD.rawValue: total.passTD += entry.value
+            case StatKind.receivingTD.rawValue: total.receivingTD += entry.value; total.receptions += entry.value
+            case StatKind.rushingTD.rawValue: total.rushingTD += entry.value
+            case StatKind.interception.rawValue: total.interceptions += entry.value
+            case StatKind.conversion.rawValue: total.conversions += entry.value
+            case StatKind.passingYards.rawValue: total.passingYards += entry.value
+            case StatKind.receivingYards.rawValue: total.receivingYards += entry.value
+            case StatKind.thrownInterception.rawValue: total.thrownInterceptions += entry.value
+            case StatKind.reception.rawValue: total.receptions += entry.value
+            case StatKind.tackle.rawValue: total.tackles += entry.value
+            case StatKind.sack.rawValue: total.sacks += entry.value
             default: break
             }
+            result[entry.playerID] = total
         }
-        for game in games where game.isFinished && game.participants.contains(id) {
-            total.appearances += 1
-            if game.blueScore != game.redScore &&
-               ((game.blueScore > game.redScore && game.blueIDs.contains(id)) ||
-                (game.redScore > game.blueScore && game.redIDs.contains(id))) {
-                total.wins += 1
+        for game in games where game.isFinished {
+            for id in game.participants {
+                var total = result[id] ?? PlayerTotals()
+                total.appearances += 1
+                if game.blueScore != game.redScore &&
+                    ((game.blueScore > game.redScore && game.blueIDs.contains(id)) ||
+                     (game.redScore > game.blueScore && game.redIDs.contains(id))) { total.wins += 1 }
+                result[id] = total
             }
         }
-        return total
+        return result
     }
 }
 
@@ -164,7 +229,7 @@ enum TeamsBalancer {
     static func split(_ players: [Player]) -> (blue: Set<UUID>, red: Set<UUID>) {
         let unique = Dictionary(players.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let sorted = unique.values.sorted {
-            if ($0.position == "QB") != ($1.position == "QB") { return $0.position == "QB" }
+            if ($0.positions.contains("QB")) != ($1.positions.contains("QB")) { return $0.positions.contains("QB") }
             if $0.overall != $1.overall { return $0.overall > $1.overall }
             return $0.id.uuidString < $1.id.uuidString
         }
@@ -176,9 +241,9 @@ enum TeamsBalancer {
             let chooseBlue: Bool
             if blue.count >= blueCapacity { chooseBlue = false }
             else if red.count >= redCapacity { chooseBlue = true }
-            else if player.position == "QB" {
-                let qbBlue = sorted.filter { $0.position == "QB" && blue.contains($0.id) }.count
-                let qbRed = sorted.filter { $0.position == "QB" && red.contains($0.id) }.count
+            else if player.positions.contains("QB") {
+                let qbBlue = sorted.filter { $0.positions.contains("QB") && blue.contains($0.id) }.count
+                let qbRed = sorted.filter { $0.positions.contains("QB") && red.contains($0.id) }.count
                 chooseBlue = qbBlue == qbRed ? blueScore <= redScore : qbBlue < qbRed
             } else { chooseBlue = blueScore <= redScore }
             if chooseBlue { blue.insert(player.id); blueScore += player.overall }
@@ -193,7 +258,7 @@ enum TeamsBalancer {
             var swap: (Player, Player)?
             for b in sorted where blue.contains(b.id) {
                 for r in sorted where red.contains(r.id) {
-                    guard (b.position == "QB") == (r.position == "QB") else { continue }
+                    guard (b.positions.contains("QB")) == (r.positions.contains("QB")) else { continue }
                     let candidate = abs((blueScore - b.overall + r.overall) - (redScore - r.overall + b.overall))
                     if candidate < best { best = candidate; swap = (b, r) }
                 }
@@ -208,10 +273,10 @@ enum TeamsBalancer {
     }
 }
 
-/// A pass and its reception form one atomic event. Scores remain explicitly manual.
+/// A pass and its reception form one atomic event. Official scores remain independently editable.
 enum FootballEvents {
-    static func make(game: MatchGame, kind: StatKind, playerID: UUID, receiverID: UUID? = nil) -> [StatEntry] {
-        guard game.participants.contains(playerID) else { return [] }
+    static func make(game: MatchGame, kind: StatKind, playerID: UUID, receiverID: UUID? = nil, value: Int = 1) -> [StatEntry] {
+        guard game.participants.contains(playerID), (1...10_000).contains(value) else { return [] }
         if kind == .passTD {
             guard let receiverID, receiverID != playerID,
                   (game.blueIDs.contains(playerID) && game.blueIDs.contains(receiverID)) ||
@@ -220,19 +285,23 @@ enum FootballEvents {
             let pass = StatEntry(matchID: game.id, playerID: playerID, kind: kind.rawValue)
             let reception = StatEntry(matchID: game.id, playerID: receiverID, kind: StatKind.receivingTD.rawValue)
             pass.eventID = eventID; reception.eventID = eventID
+            pass.value = value; reception.value = value
             return [pass, reception]
         }
-        return [StatEntry(matchID: game.id, playerID: playerID, kind: kind.rawValue)]
+        let entry = StatEntry(matchID: game.id, playerID: playerID, kind: kind.rawValue)
+        entry.value = value
+        return [entry]
     }
     static func points(kind: StatKind, game: MatchGame) -> Int {
         switch kind {
         case .passTD, .receivingTD, .rushingTD: return game.touchdownPoints
         case .conversion: return game.conversionPoints
-        case .interception: return 0
+        default: return 0
         }
     }
-    static func applyScore(kind: StatKind, playerID: UUID, game: MatchGame) {
-        let award = points(kind: kind, game: game)
+    static func applyScore(kind: StatKind, playerID: UUID, game: MatchGame, value: Int = 1) {
+        guard (1...10_000).contains(value), game.participants.contains(playerID) else { return }
+        let award = points(kind: kind, game: game) * value
         if game.blueIDs.contains(playerID) { game.blueScore += award }
         else if game.redIDs.contains(playerID) { game.redScore += award }
     }
@@ -248,5 +317,35 @@ enum InputValidation {
         guard let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: ".")),
               value.isFinite, value >= 0, value <= 1_000_000 else { return nil }
         return (value * 100).rounded() / 100
+    }
+}
+
+
+enum ContributionRules {
+    static let passingTouchdown = 4
+    static func points(_ totals: PlayerTotals) -> Int {
+        totals.touchdowns * 6 + totals.passTD * passingTouchdown + totals.interceptions * 2 + totals.conversions
+    }
+}
+
+struct TeamRecordSummary {
+    var played = 0
+    var wins = 0
+    var losses = 0
+    var ties = 0
+    var pointsFor = 0
+    var pointsAgainst = 0
+    static func calculate(teamID: UUID, games: [MatchGame]) -> TeamRecordSummary {
+        var result = TeamRecordSummary()
+        for game in games where game.isFinished && (game.teamID == teamID || game.opponentTeamID == teamID) {
+            let home = game.teamID == teamID
+            let scored = home ? game.blueScore : game.redScore
+            let allowed = home ? game.redScore : game.blueScore
+            result.played += 1; result.pointsFor += scored; result.pointsAgainst += allowed
+            if scored > allowed { result.wins += 1 }
+            else if scored < allowed { result.losses += 1 }
+            else { result.ties += 1 }
+        }
+        return result
     }
 }

@@ -3,13 +3,15 @@ import SwiftData
 import UniformTypeIdentifiers
 
 struct LocalBackup: Codable {
-    var version = 1
+    var version = 2
+    var teams: [TeamBackupRecord]? = nil
     var clubs: [ClubRecord]
     var seasons: [SeasonRecord]
     var players: [PlayerRecord]
     var matchgames: [MatchGameRecord]
     var statentrys: [StatEntryRecord]
     @MainActor init(context: ModelContext) throws {
+        teams = try context.fetch(FetchDescriptor<Team>()).map(TeamBackupRecord.init)
         clubs = try context.fetch(FetchDescriptor<Club>()).map(ClubRecord.init)
         seasons = try context.fetch(FetchDescriptor<Season>()).map(SeasonRecord.init)
         players = try context.fetch(FetchDescriptor<Player>()).map(PlayerRecord.init)
@@ -18,25 +20,44 @@ struct LocalBackup: Codable {
     }
     /// Restore only into an empty store; never overwrite existing local data.
     @MainActor func restore(context: ModelContext) throws {
-        guard version == 1 else { throw BackupError.invalid }
+        guard (1...2).contains(version) else { throw BackupError.invalid }
         guard try context.fetchCount(FetchDescriptor<Club>()) == 0 else { throw BackupError.notEmpty }
         guard try context.fetchCount(FetchDescriptor<Season>()) == 0 else { throw BackupError.notEmpty }
         guard try context.fetchCount(FetchDescriptor<Player>()) == 0 else { throw BackupError.notEmpty }
         guard try context.fetchCount(FetchDescriptor<MatchGame>()) == 0 else { throw BackupError.notEmpty }
         guard try context.fetchCount(FetchDescriptor<StatEntry>()) == 0 else { throw BackupError.notEmpty }
+        guard try context.fetchCount(FetchDescriptor<Team>()) == 0 else { throw BackupError.notEmpty }
         let clubs = Set(self.clubs.map(\.id)), seasons = Set(self.seasons.map(\.id))
         let players = Set(self.players.map(\.id)), matches = Set(matchgames.map(\.id))
         guard clubs.count <= 1, clubs.count == self.clubs.count, seasons.count == self.seasons.count,
               players.count == self.players.count, matches.count == matchgames.count,
               Set(statentrys.map(\.id)).count == statentrys.count else { throw BackupError.invalid }
         for c in self.clubs where c.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || c.sport != "football" { throw BackupError.invalid }
+        for c in self.clubs {
+            if let id = c.localProfileID { guard self.players.contains(where: { $0.id == id && $0.clubID == c.id }) else { throw BackupError.invalid } }
+        }
         for s in self.seasons where !clubs.contains(s.clubID) || s.name.isEmpty { throw BackupError.invalid }
-        for p in self.players where !clubs.contains(p.clubID) || p.name.isEmpty || !(1...99).contains(p.overall) || !(0...99).contains(p.number) || Position(rawValue: p.position) == nil { throw BackupError.invalid }
+        for p in self.players where !clubs.contains(p.clubID) || p.name.isEmpty || !(1...99).contains(p.overall) || !(0...99).contains(p.number) || Position(rawValue: p.position) == nil || !(p.secondaryPositions ?? "").split(separator: ",").allSatisfy({ Position(rawValue: String($0)) != nil }) { throw BackupError.invalid }
+        let teamIDs = Set((teams ?? []).map(\.id))
+        guard teamIDs.count == (teams ?? []).count else { throw BackupError.invalid }
+        for team in teams ?? [] {
+            for text in [team.members, team.captains] {
+                guard text.isEmpty || text.split(separator: ",", omittingEmptySubsequences: false).allSatisfy({ UUID(uuidString: String($0)) != nil }) else { throw BackupError.invalid }
+            }
+            guard clubs.contains(team.clubID), !team.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  IDList.decode(team.members).isSubset(of: players),
+                  IDList.decode(team.captains).isSubset(of: IDList.decode(team.members)),
+                  self.players.filter({ IDList.decode(team.members).contains($0.id) }).allSatisfy({ $0.clubID == team.clubID }) else { throw BackupError.invalid }
+        }
         for g in matchgames {
             for text in [g.bluePlayerIDs, g.redPlayerIDs, g.paidPlayerIDs] {
                 guard text.isEmpty || text.split(separator: ",", omittingEmptySubsequences: false).allSatisfy({ UUID(uuidString: String($0)) != nil }) else { throw BackupError.invalid }
             }
             let blue = IDList.decode(g.bluePlayerIDs), red = IDList.decode(g.redPlayerIDs)
+            for id in [g.teamID, g.opponentTeamID].compactMap({ $0 }) {
+                guard (teams ?? []).contains(where: { $0.id == id && $0.clubID == g.clubID }) else { throw BackupError.invalid }
+            }
+            guard g.teamID == nil || g.teamID != g.opponentTeamID else { throw BackupError.invalid }
             guard clubs.contains(g.clubID), seasons.contains(g.seasonID),
                   self.seasons.contains(where: { $0.id == g.seasonID && $0.clubID == g.clubID }),
                   blue.isDisjoint(with: red), blue.union(red).isSubset(of: players),
@@ -47,18 +68,19 @@ struct LocalBackup: Codable {
                   (1...12).contains(g.touchdownPoints), (1...3).contains(g.conversionPoints) else { throw BackupError.invalid }
         }
         for e in statentrys {
-            guard matches.contains(e.matchID), players.contains(e.playerID), StatKind(rawValue: e.kind) != nil,
+            guard matches.contains(e.matchID), players.contains(e.playerID), StatKind(rawValue: e.kind) != nil, (1...10_000).contains(e.value ?? 1),
                   let game = matchgames.first(where: { $0.id == e.matchID }),
                   IDList.decode(game.bluePlayerIDs).union(IDList.decode(game.redPlayerIDs)).contains(e.playerID) else { throw BackupError.invalid }
         }
         let linked = Dictionary(grouping: statentrys.filter { $0.eventID != nil }, by: { $0.eventID! })
         for pair in linked.values {
             guard pair.count == 2, Set(pair.map(\.kind)) == Set([StatKind.passTD.rawValue, StatKind.receivingTD.rawValue]),
-                  pair[0].matchID == pair[1].matchID, pair[0].playerID != pair[1].playerID,
+                  pair[0].matchID == pair[1].matchID, pair[0].value == pair[1].value, pair[0].playerID != pair[1].playerID,
                   let game = matchgames.first(where: { $0.id == pair[0].matchID }),
                   IDList.decode(game.bluePlayerIDs).contains(pair[0].playerID) == IDList.decode(game.bluePlayerIDs).contains(pair[1].playerID) else { throw BackupError.invalid }
         }
         do {
+            for record in teams ?? [] { context.insert(record.model()) }
             for record in self.clubs { context.insert(record.model()) }
             for record in self.seasons { context.insert(record.model()) }
             for record in self.players { context.insert(record.model()) }
@@ -80,11 +102,13 @@ enum BackupError: LocalizedError {
 }
 
 struct ClubRecord: Codable {
+    var localProfileID: UUID?
     var id: UUID
     var name: String
     var sport: String
     var createdAt: Date
     init(_ value: Club) {
+        localProfileID = value.localProfileID
         id = value.id
         name = value.name
         sport = value.sport
@@ -92,6 +116,7 @@ struct ClubRecord: Codable {
     }
     func model() -> Club {
         let value = Club(name: name, sport: sport)
+        value.localProfileID = localProfileID
         value.id = id
         value.name = name
         value.sport = sport
@@ -122,6 +147,9 @@ struct SeasonRecord: Codable {
 }
 
 struct PlayerRecord: Codable {
+    var photoData: Data?
+    var secondaryPositions: String?
+    var hasNumber: Bool?
     var id: UUID
     var clubID: UUID
     var name: String
@@ -130,6 +158,9 @@ struct PlayerRecord: Codable {
     var overall: Int
     var createdAt: Date
     init(_ value: Player) {
+        photoData = value.photoData
+        secondaryPositions = value.secondaryPositions
+        hasNumber = value.hasNumber
         id = value.id
         clubID = value.clubID
         name = value.name
@@ -140,6 +171,9 @@ struct PlayerRecord: Codable {
     }
     func model() -> Player {
         let value = Player(clubID: clubID, name: name, position: position, number: number, overall: overall)
+        value.photoData = photoData
+        value.secondaryPositions = secondaryPositions ?? ""
+        value.hasNumber = hasNumber ?? true
         value.id = id
         value.clubID = clubID
         value.name = name
@@ -152,6 +186,9 @@ struct PlayerRecord: Codable {
 }
 
 struct MatchGameRecord: Codable {
+    var teamID: UUID?
+    var opponentTeamID: UUID?
+    var opponentName: String?
     var id: UUID
     var clubID: UUID
     var seasonID: UUID
@@ -167,6 +204,9 @@ struct MatchGameRecord: Codable {
     var touchdownPoints: Int
     var conversionPoints: Int
     init(_ value: MatchGame) {
+        teamID = value.teamID
+        opponentTeamID = value.opponentTeamID
+        opponentName = value.opponentName
         id = value.id
         clubID = value.clubID
         seasonID = value.seasonID
@@ -184,6 +224,9 @@ struct MatchGameRecord: Codable {
     }
     func model() -> MatchGame {
         let value = MatchGame(clubID: clubID, seasonID: seasonID, date: date, venue: venue, totalCost: totalCost)
+        value.teamID = teamID
+        value.opponentTeamID = opponentTeamID
+        value.opponentName = opponentName ?? ""
         value.id = id
         value.clubID = clubID
         value.seasonID = seasonID
@@ -203,6 +246,7 @@ struct MatchGameRecord: Codable {
 }
 
 struct StatEntryRecord: Codable {
+    var value: Int?
     var id: UUID
     var eventID: UUID?
     var matchID: UUID
@@ -210,6 +254,7 @@ struct StatEntryRecord: Codable {
     var kind: String
     var createdAt: Date
     init(_ value: StatEntry) {
+        value = value.value
         id = value.id
         eventID = value.eventID
         matchID = value.matchID
@@ -219,6 +264,7 @@ struct StatEntryRecord: Codable {
     }
     func model() -> StatEntry {
         let value = StatEntry(matchID: matchID, playerID: playerID, kind: kind)
+        value.value = value ?? 1
         value.id = id
         value.eventID = eventID
         value.matchID = matchID
@@ -240,6 +286,7 @@ struct BackupDocument: FileDocument {
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 
+@MainActor
 struct BackupView: View {
     @Environment(\.modelContext) private var context
     @State private var document = BackupDocument()
@@ -278,5 +325,27 @@ struct BackupView: View {
         .alert("Sauvegarde", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
             Button("OK", role: .cancel) { message = nil }
         } message: { Text(message ?? "") }
+    }
+}
+
+
+struct TeamBackupRecord: Codable {
+    var id: UUID
+    var clubID: UUID
+    var name: String
+    var members: String
+    var captains: String
+    var logoData: Data?
+    var createdAt: Date
+    init(_ team: Team) {
+        id = team.id; clubID = team.clubID; name = team.name
+        members = team.memberPlayerIDs; captains = team.captainPlayerIDs
+        logoData = team.logoData; createdAt = team.createdAt
+    }
+    func model() -> Team {
+        let team = Team(clubID: clubID, name: name)
+        team.id = id; team.memberPlayerIDs = members; team.captainPlayerIDs = captains
+        team.logoData = logoData; team.createdAt = createdAt
+        return team
     }
 }

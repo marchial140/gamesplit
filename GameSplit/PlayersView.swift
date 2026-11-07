@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 
+@MainActor
 struct PlayersView: View {
     let club: Club
     @Query(sort: \Player.name) private var allPlayers: [Player]
@@ -16,13 +17,14 @@ struct PlayersView: View {
                         PlayerDetailsView(player: player, games: allGames.filter { $0.clubID == club.id }, entries: allEntries)
                     } label: {
                         HStack(spacing: 12) {
+                            SportAvatar(data: player.photoData, name: player.name)
                             Text("\(player.overall)")
                                 .font(.title2.bold()).monospacedDigit()
                                 .frame(width: 52, height: 52)
                                 .background(.mint.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
                             VStack(alignment: .leading) {
                                 Text(player.name).font(.headline)
-                                Text("#\(player.number) • \(player.position)")
+                                Text((player.hasNumber ? "#\(player.number) • " : "") + player.positionLabel)
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding(.vertical, 4)
@@ -39,6 +41,7 @@ struct PlayersView: View {
     }
 }
 
+@MainActor
 struct PlayerEditorView: View {
     let clubID: UUID
     var player: Player? = nil
@@ -53,15 +56,39 @@ struct PlayerEditorView: View {
     @State private var position = "WR"
     @State private var number = 0
     @State private var overall = 75
+    @State private var photoData: Data?
+    @State private var hasNumber = true
+    @State private var secondary = Set<String>()
+    @State private var memberships = Set<UUID>()
+    @State private var initialized = false
+    @Query private var allTeams: [Team]
+    private var teams: [Team] { allTeams.filter { $0.clubID == clubID } }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Identité") {
                     TextField("Prénom / surnom", text: $name)
-                    Stepper("Numéro : \(number)", value: $number, in: 0...99)
+                    LocalPhotoPicker(data: $photoData)
+                    Toggle("Afficher un numéro", isOn: $hasNumber)
+                    if hasNumber { Stepper("Numéro : \(number)", value: $number, in: 0...99) }
                     Picker("Position", selection: $position) {
                         ForEach(Position.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                }
+                Section("Positions secondaires") {
+                    ForEach(Position.allCases.filter { $0.rawValue != position }) { value in
+                        Toggle(value.rawValue, isOn: Binding(get: { secondary.contains(value.rawValue) }, set: { on in
+                            if on { secondary.insert(value.rawValue) } else { secondary.remove(value.rawValue) }
+                        }))
+                    }
+                }
+                Section("Équipes") {
+                    if teams.isEmpty { Text("Créez des équipes depuis l’onglet Équipes.").foregroundStyle(.secondary) }
+                    ForEach(teams) { team in
+                        Toggle(team.name, isOn: Binding(get: { memberships.contains(team.id) }, set: { on in
+                            if on { memberships.insert(team.id) } else { memberships.remove(team.id) }
+                        }))
                     }
                 }
                 Section("Évaluation du gérant") {
@@ -77,21 +104,29 @@ struct PlayerEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Enregistrer") {
                         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if let player {
-                            player.name = cleanName; player.position = position
-                            player.number = number; player.overall = overall
-                        } else {
-                            context.insert(Player(clubID: clubID, name: cleanName, position: position,
-                                                  number: number, overall: overall))
+                        let value = player ?? Player(clubID: clubID, name: cleanName)
+                        if player == nil { context.insert(value) }
+                        value.name = cleanName; value.position = position
+                        value.number = number; value.hasNumber = hasNumber; value.overall = overall
+                        value.photoData = photoData; value.secondaryPositions = secondary.subtracting([position]).sorted().joined(separator: ",")
+                        for team in teams {
+                            var ids = team.memberIDs
+                            if memberships.contains(team.id) { ids.insert(value.id) }
+                            else { ids.remove(value.id); var captains = team.captainIDs; captains.remove(value.id); team.captainIDs = captains }
+                            team.memberIDs = ids
                         }
                         if saveChanges() { dismiss() }
                     }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .onAppear {
+                guard !initialized else { return }; initialized = true
                 if let player {
                     name = player.name; position = player.position
                     number = player.number; overall = player.overall
+                    photoData = player.photoData; hasNumber = player.hasNumber
+                    secondary = player.positions.subtracting([player.position])
+                    memberships = Set(teams.filter { $0.memberIDs.contains(player.id) }.map(\.id))
                 }
             }
         }
@@ -102,11 +137,24 @@ struct PlayerEditorView: View {
     }
 }
 
+@MainActor
 struct PlayerDetailsView: View {
     let player: Player
     let games: [MatchGame]
     let entries: [StatEntry]
     @State private var editing = false
+    @Query private var allTeams: [Team]
+    private var teams: [Team] { allTeams.filter { $0.clubID == player.clubID && $0.memberIDs.contains(player.id) } }
+    private var history: [MatchGame] { filteredGames.filter { $0.participants.contains(player.id) }.sorted { $0.date > $1.date } }
+    private var personalRecords: (passing: Int, touchdowns: Int) {
+        let ids = Set(history.map(\.id))
+        var passing: [UUID: Int] = [:], touchdowns: [UUID: Int] = [:]
+        for entry in entries where entry.playerID == player.id && ids.contains(entry.matchID) {
+            if entry.kind == StatKind.passTD.rawValue { passing[entry.matchID, default: 0] += entry.value }
+            if entry.kind == StatKind.receivingTD.rawValue || entry.kind == StatKind.rushingTD.rawValue { touchdowns[entry.matchID, default: 0] += entry.value }
+        }
+        return (passing.values.max() ?? 0, touchdowns.values.max() ?? 0)
+    }
     @State private var selectedSeason: UUID?
     @Query(sort: \Season.createdAt, order: .reverse) private var allSeasons: [Season]
     private var seasons: [Season] { allSeasons.filter { $0.clubID == player.clubID } }
@@ -114,26 +162,57 @@ struct PlayerDetailsView: View {
     private var totals: PlayerTotals { Totals.forPlayer(player.id, games: filteredGames, entries: entries) }
 
     var body: some View {
+        let periodTotals = totals
+        let records = personalRecords
         ScrollView {
             VStack(spacing: 18) {
                 Picker("Période", selection: $selectedSeason) {
                     Text("Carrière").tag(UUID?.none)
                     ForEach(seasons) { Text($0.name).tag(Optional($0.id)) }
                 }
-                PlayerCard(player: player, totals: totals)
+                PlayerCard(player: player, totals: periodTotals)
+                if !teams.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Équipes").font(.headline)
+                        ForEach(teams) { team in
+                            HStack { SportAvatar(data: team.logoData, name: team.name, size: 30); Text(team.name) }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
                 HStack(spacing: 12) {
-                    LabelValue(label: "Matchs", value: "\(totals.appearances)")
-                    LabelValue(label: "Victoires", value: "\(totals.wins)")
-                    LabelValue(label: "Interceptions", value: "\(totals.interceptions)")
+                    LabelValue(label: "Matchs", value: "\(periodTotals.appearances)")
+                    LabelValue(label: "Victoires", value: "\(periodTotals.wins)")
+                    LabelValue(label: "Interceptions", value: "\(periodTotals.interceptions)")
                 }
                 .padding().background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 16))
                 VStack(alignment: .leading, spacing: 12) {
                     Text(selectedSeason == nil ? "Statistiques de carrière" : "Statistiques de saison").font(.headline)
-                    LabeledContent("Passes TD", value: "\(totals.passTD)")
-                    LabeledContent("TD sur réception", value: "\(totals.receivingTD)")
-                    LabeledContent("TD au sol", value: "\(totals.rushingTD)")
-                    LabeledContent("Conversions", value: "\(totals.conversions)")
+                    LabeledContent("Passes TD", value: "\(periodTotals.passTD)")
+                    LabeledContent("TD sur réception", value: "\(periodTotals.receivingTD)")
+                    LabeledContent("TD au sol", value: "\(periodTotals.rushingTD)")
+                    LabeledContent("Conversions", value: "\(periodTotals.conversions)")
+                    LabeledContent("Verges par la passe", value: "\(periodTotals.passingYards)")
+                    LabeledContent("Interceptions lancées", value: "\(periodTotals.thrownInterceptions)")
+                    LabeledContent("Réceptions (TD inclus)", value: "\(periodTotals.receptions)")
+                    LabeledContent("Verges de réception", value: "\(periodTotals.receivingYards)")
+                    LabeledContent("Plaqués", value: "\(periodTotals.tackles)")
+                    LabeledContent("Sacs du quart", value: "\(periodTotals.sacks)")
+                    LabeledContent("Contribution (non officielle)", value: "\(periodTotals.contributionPoints)")
                 }.padding().background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 16))
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Meilleures performances — période choisie").font(.headline)
+                    LabeledContent("Passes TD en un match", value: "\(records.passing)")
+                    LabeledContent("TD marqués en un match", value: "\(records.touchdowns)")
+                    Text("Historique des matchs").font(.headline)
+                    if history.isEmpty { Text("Aucun match pour cette période.").foregroundStyle(.secondary) }
+                    ForEach(history) { game in
+                        NavigationLink { MatchDetailsView(game: game) } label: { MatchRow(game: game) }
+                        Divider()
+                    }
+                }.padding().background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 16))
+                ShareLink(item: "GameSplit — \(player.name)\n\(player.positionLabel) • \(player.overall) OVR\n\(periodTotals.appearances) matchs • \(periodTotals.passTD) passes TD • \(periodTotals.touchdowns) TD marqués") {
+                    Label("Partager mes performances", systemImage: "square.and.arrow.up")
+                }
             }.padding()
         }
         .navigationTitle(player.name)
@@ -145,16 +224,18 @@ struct PlayerDetailsView: View {
     }
 }
 
+@MainActor
 struct PlayerCard: View {
     let player: Player
     let totals: PlayerTotals
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top) {
+                SportAvatar(data: player.photoData, name: player.name, size: 64)
                 VStack(alignment: .leading, spacing: 5) {
                     Text("GAMESPLIT • FICHE JOUEUR").font(.caption2.bold()).tracking(2).foregroundStyle(.mint)
                     Text(player.name).font(.system(size: 27, weight: .heavy, design: .rounded))
-                    Text("#\(player.number)   •   \(player.position)").foregroundStyle(.white.opacity(0.75))
+                    Text((player.hasNumber ? "#\(player.number) • " : "") + player.positionLabel).foregroundStyle(.white.opacity(0.75))
                 }
                 Spacer()
                 VStack {
@@ -170,8 +251,8 @@ struct PlayerCard: View {
         }
         .foregroundStyle(.white)
         .padding(24)
-        .background(LinearGradient(colors: [Color(red: 0.06, green: 0.19, blue: 0.32),
-                                            Color(red: 0.06, green: 0.29, blue: 0.27)],
+        .background(LinearGradient(colors: [SportTheme.navy,
+                                            SportTheme.accent],
                                    startPoint: .topLeading, endPoint: .bottomTrailing),
                     in: RoundedRectangle(cornerRadius: 20))
     }

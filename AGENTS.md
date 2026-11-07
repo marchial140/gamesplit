@@ -1,20 +1,13 @@
-# Codex instructions — GameSplit V1
+# GameSplit — development instructions
 
-## Product
-Build and refine a native iPhone MVP for *flag/touch football* organizers. The app is **French first**, supports **iOS 17+**, uses **SwiftUI + SwiftData**, and is fully offline in V1. The data schema includes `Club.sport` so future sports can be added without a rewrite.
+Continue the existing SwiftUI + SwiftData iPhone app (iOS 17+), in French. Read `docs/V1_1_REQUIREMENTS.md` for current priorities; `CODEX_TASK.md` records the original V1 scope.
 
-## Nonnegotiable
-- Do not add authentication, cloud sync, third-party APIs, paid dependencies, or bank integrations to V1.
-- All player, match, season, stat and payment data must persist locally.
-- Do not invent payment confirmations. Only manual paid/unpaid toggles.
-- Touchdown by pass = one `pass_td` stat for QB and one `receiving_td` for receiver; count as **one** team touchdown, not two.
-- Team point awards configurable/editable. Actual score is not a sum of “GameSplit contribution points.”
-- Keep interactive components accessible, with usable font sizes and empty states.
-- Avoid destructive migrations and do not lose user data.
-- Keep code modular and include automated tests for scoring, ID encoding, team balancing and zero-participant cost.
-
-## First Codex task
-Read `CODEX_TASK.md` and the entire project. Build for iOS simulator on macOS/Xcode where available; fix compile errors and failing tests. If Xcode is unavailable, perform a static review and report the absence of executable verification. Complete the V1 acceptance criteria before polishing visuals.
-
-## Completed starter work
-The source files contain first-pass implementation of: welcome/create group, players/OVR, games/teams, match results, event stats, local seasons, standings, cost splitting, and sharing text. It is a source prototype, **not verified with Xcode**.
+- Priority 1 V1.1 is local: richer profiles, photos, multiple teams/positions, position stats, four individual points per passing TD. Keep a stable UUID per player across teams. OVR stays manual, 1–99.
+- Preserve existing IDs, data, functionality and JSON V1 import. Add optional/defaulted schema fields. Do not delete stores or silently replace user data to resolve migration errors. Verify actual V1 → V1.1 migration on Mac before claiming compatibility.
+- Keep `FinancesView.swift` and existing finance calculations/interface unchanged. Payments are manual; no bank integration.
+- Passing touchdown: one linked passer record and one receiving record, one team score award. Individual contribution rules are centralized in `ContributionRules`, separate from the official score. Quantity edits/deletions must not duplicate totals.
+- Stats and activities derive from current data. Membership changes must not reassign historical match sides. A paid participant cannot be removed by the roster editor.
+- No fake login, invitations or sync. Local profile selection is not authentication; captain designations are not verified permissions. See `docs/SOCIAL_BACKEND.md` for the proposed Supabase stage and access requirements.
+- Resize local photos, support accessible text and empty states. Do not add paid or third-party application dependencies for the local stage.
+- Run `scripts/test-ios.sh` on macOS/Xcode and report actual XCTest outcomes. On Linux, structural checks are useful but never imply Apple type checking, rendered UI, migration, or XCTest execution.
+- Do not publish an app or deploy a backend without explicit authorization.
