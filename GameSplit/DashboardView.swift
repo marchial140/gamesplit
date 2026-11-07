@@ -43,7 +43,13 @@ struct DashboardView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Accueil")
-            .toolbar { NavigationLink("Sauvegarde", systemImage: "externaldrive") { BackupView() } }
+            .toolbar {
+                NavigationLink {
+                    BackupView()
+                } label: {
+                    Label("Sauvegarde", systemImage: "externaldrive")
+                }
+            }
         }
     }
 }
