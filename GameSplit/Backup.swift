@@ -253,25 +253,25 @@ struct StatEntryRecord: Codable {
     var playerID: UUID
     var kind: String
     var createdAt: Date
-    init(_ value: StatEntry) {
-        value = value.value
-        id = value.id
-        eventID = value.eventID
-        matchID = value.matchID
-        playerID = value.playerID
-        kind = value.kind
-        createdAt = value.createdAt
+    init(_ entry: StatEntry) {
+        value = entry.value
+        id = entry.id
+        eventID = entry.eventID
+        matchID = entry.matchID
+        playerID = entry.playerID
+        kind = entry.kind
+        createdAt = entry.createdAt
     }
     func model() -> StatEntry {
-        let value = StatEntry(matchID: matchID, playerID: playerID, kind: kind)
-        value.value = value ?? 1
-        value.id = id
-        value.eventID = eventID
-        value.matchID = matchID
-        value.playerID = playerID
-        value.kind = kind
-        value.createdAt = createdAt
-        return value
+        let entry = StatEntry(matchID: matchID, playerID: playerID, kind: kind)
+        entry.value = value ?? 1
+        entry.id = id
+        entry.eventID = eventID
+        entry.matchID = matchID
+        entry.playerID = playerID
+        entry.kind = kind
+        entry.createdAt = createdAt
+        return entry
     }
 }
 

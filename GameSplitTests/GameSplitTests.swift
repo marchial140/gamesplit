@@ -149,7 +149,7 @@ final class V11Tests: XCTestCase {
         try ModelContainer(for: Club.self, Season.self, Player.self, MatchGame.self, StatEntry.self, Team.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true))
     }
-    func testFourIndividualPointsDoNotChangeSixTeamPoints() {
+    func testFourIndividualPointsDoNotChangeSixTeamPoints() throws {
         let player = Player(clubID: UUID(), name: "Alex", position: "QB")
         let receiver = Player(clubID: player.clubID, name: "Max")
         let game = MatchGame(clubID: player.clubID, seasonID: UUID(), date: .now, venue: "")
@@ -157,6 +157,13 @@ final class V11Tests: XCTestCase {
         let entries = FootballEvents.make(game: game, kind: .passTD, playerID: player.id, receiverID: receiver.id, value: 4)
         FootballEvents.applyScore(kind: .passTD, playerID: player.id, game: game, value: 4)
         XCTAssertEqual(game.blueScore, 24)
+        // Backup serialization must preserve quantities and the linked event ID.
+        let saved = try JSONEncoder().encode(StatEntryRecord(entries[0]))
+        let restored = try JSONDecoder().decode(StatEntryRecord.self, from: saved).model()
+        XCTAssertEqual(restored.value, 4)
+        XCTAssertEqual(restored.id, entries[0].id)
+        XCTAssertEqual(restored.eventID, entries[0].eventID)
+        XCTAssertEqual(restored.kind, entries[0].kind)
         let totals = Totals.byPlayer(games: [game], entries: entries)
         XCTAssertEqual(totals[player.id]?.contributionPoints, 16)
         XCTAssertEqual(totals[receiver.id]?.receivingTD, 4)
