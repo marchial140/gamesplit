@@ -9,6 +9,8 @@ struct CalendarRow: Identifiable {
     let opponent: String
     let teamName: String
     let cost: Double
+    var bluePlayerIDs: Set<UUID> = []
+    var redPlayerIDs: Set<UUID> = []
 }
 
 enum CalendarCSVError: LocalizedError {
@@ -68,7 +70,16 @@ enum CalendarCSV {
                   let cost = InputValidation.cost(value("cout").isEmpty ? "0" : value("cout")) else {
                 throw CalendarCSVError.invalid("Ligne \(offset + 2) : date ou coût invalide.")
             }
-            return CalendarRow(date: date, venue: value("lieu"), opponent: value("adversaire"), teamName: value("equipe"), cost: cost)
+            for name in ["bleus", "rouges"] {
+                let ids = value(name)
+                guard ids.isEmpty || ids.split(separator: ",", omittingEmptySubsequences: false).allSatisfy({ UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) != nil }) else {
+                    throw CalendarCSVError.invalid("Ligne \(offset + 2) : identifiant de participant invalide dans \(name).")
+                }
+            }
+            var row = CalendarRow(date: date, venue: value("lieu"), opponent: value("adversaire"), teamName: value("equipe"), cost: cost)
+            row.bluePlayerIDs = Set(value("bleus").split(separator: ",").compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) })
+            row.redPlayerIDs = Set(value("rouges").split(separator: ",").compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) })
+            return row
         }
     }
     static func key(seasonID: UUID, date: Date, venue: String, teamID: UUID?, opponent: String) -> String {
@@ -98,13 +109,13 @@ struct CalendarImportView: View {
         Form {
             Section("Calendrier CSV") {
                 Text("Colonnes : date,lieu,adversaire,equipe,cout. Seule date est obligatoire. Format ISO 8601 avec fuseau, ou AAAA-MM-JJ HH:mm dans le fuseau du téléphone. Virgule ou point-virgule ; guillemets acceptés.").font(.subheadline)
-                Text("Exemple : 2027-06-12T19:00:00-04:00,Parc Nord,Les Lynx,Éclairs,0").font(.caption).textSelection(.enabled)
+                Text("Exemple récréatif : 2027-06-12T19:00:00-04:00,Parc Nord,Les Lynx,,0").font(.caption).textSelection(.enabled)
                 Picker("Saison", selection: $selectedSeason) {
                     Text("Choisir").tag(UUID?.none)
                     ForEach(seasons) { Text($0.name).tag(Optional($0.id)) }
                 }
                 Button("Choisir un fichier CSV") { importing = true }
-                Text("Le nom d’équipe doit correspondre à une équipe existante. Les adversaires sont conservés en texte. Les présents et statistiques se renseignent après import. Les doublons de saison/date/lieu/équipe/adversaire sont ignorés.").font(.caption).foregroundStyle(.secondary)
+                Text("Match officiel : equipe doit exister et les colonnes bleus et rouges doivent contenir les UUID des présents de chaque camp (séparés par des virgules, entre guillemets). Le nom d’un adversaire existant est reconnu. Sans equipe, le calendrier récréatif peut être importé sans présents, à compléter ensuite. Les doublons sont ignorés.").font(.caption).foregroundStyle(.secondary)
             }
             if !rows.isEmpty {
                 Section("Aperçu • \(rows.count) matchs") {
@@ -162,17 +173,29 @@ enum CalendarImporter {
             CalendarCSV.key(seasonID: game.seasonID, date: game.date, venue: game.venue, teamID: game.teamID,
                 opponent: teams.first(where: { $0.id == game.opponentTeamID })?.name ?? game.opponentName)
         })
-        var added = 0, duplicates = 0
-        do {
-            for (row, team) in resolved {
-                let key = CalendarCSV.key(seasonID: seasonID, date: row.date, venue: row.venue, teamID: team?.id, opponent: row.opponent)
-                guard known.insert(key).inserted else { duplicates += 1; continue }
-                let game = MatchGame(clubID: clubID, seasonID: seasonID, date: row.date, venue: row.venue, totalCost: row.cost)
-                game.teamID = team?.id; game.opponentName = row.opponent
-                context.insert(game); added += 1
+        let players = try context.fetch(FetchDescriptor<Player>())
+        var planned: [MatchGame] = []
+        var duplicates = 0
+        // Plan and validate every new row before inserting anything.
+        for (row, team) in resolved {
+            let key = CalendarCSV.key(seasonID: seasonID, date: row.date, venue: row.venue, teamID: team?.id, opponent: row.opponent)
+            guard known.insert(key).inserted else { duplicates += 1; continue }
+            let opponents = teams.filter { $0.name.compare(row.opponent, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
+            guard team == nil || opponents.count <= 1 else { throw CalendarCSVError.invalid("Adversaire ambigu : \(row.opponent).") }
+            let game = MatchGame(clubID: clubID, seasonID: seasonID, date: row.date, venue: row.venue, totalCost: row.cost)
+            game.teamID = team?.id; game.opponentName = row.opponent
+            game.opponentTeamID = team == nil ? nil : opponents.first?.id
+            game.blueIDs = row.bluePlayerIDs; game.redIDs = row.redPlayerIDs
+            if let issue = MatchValidation.issue(clubID: clubID, teamID: game.teamID, opponentTeamID: game.opponentTeamID, opponentName: game.opponentName,
+                blue: game.blueIDs, red: game.redIDs, teams: teams, players: players, requireRecreationalParticipants: false) {
+                throw CalendarCSVError.invalid("\(row.date.formatted(date: .abbreviated, time: .shortened)) : \(issue) Aucun match importé.")
             }
+            planned.append(game)
+        }
+        do {
+            for game in planned { context.insert(game) }
             try context.save()
-            return (added, duplicates)
+            return (planned.count, duplicates)
         } catch { context.rollback(); throw error }
     }
 }

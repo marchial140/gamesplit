@@ -8,49 +8,66 @@ struct DashboardView: View {
     @Query(sort: \MatchGame.date, order: .reverse) private var games: [MatchGame]
     @Query private var entries: [StatEntry]
     @Query private var teams: [Team]
+    @State private var planning = false
     private var clubGames: [MatchGame] { games.filter { $0.clubID == club.id } }
+    private var finished: [MatchGame] { clubGames.filter(\.isFinished) }
     private var weekGames: [MatchGame] {
         let week = Calendar.current.dateInterval(of: .weekOfYear, for: .now)
-        return clubGames.filter { $0.isFinished && (week?.contains($0.date) ?? false) && $0.date <= .now }
+        return finished.filter { (week?.contains($0.date) ?? false) && $0.date <= .now }
     }
+    private var next: MatchGame? { clubGames.filter { !$0.isFinished && $0.date >= .now }.min { $0.date < $1.date } }
     var body: some View {
         let weekly = Totals.byPlayer(games: weekGames, entries: entries)
+        let positions = ["QB", "WR", "DB", "Rusher"].filter { position in
+            players.contains { $0.clubID == club.id && $0.positions.contains(position) && PerformanceEligibility.hasPerformance(weekly[$0.id] ?? PlayerTotals(), position: position) }
+        }
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("VOTRE TERRAIN. VOTRE HISTOIRE.").font(.caption.bold()).tracking(1)
-                        Text(club.name).font(.largeTitle.bold())
-                        Text("Flag football • communauté locale").font(.subheadline)
-                    }.foregroundStyle(.white).frame(maxWidth: .infinity, alignment: .leading).padding(24)
-                        .background(LinearGradient(colors: [SportTheme.navy, SportTheme.accent], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 24))
-                    if let next = clubGames.filter({ !$0.isFinished && $0.date >= .now }).min(by: { $0.date < $1.date }) {
-                        Text("PROCHAIN RENDEZ-VOUS").font(.caption.bold()).foregroundStyle(.secondary)
-                        NavigationLink { MatchDetailsView(game: next) } label: { MatchRow(game: next) }.buttonStyle(.plain)
+                    brandHeader
+                    if let next {
+                        SportHeading(title: "Prochain rendez-vous")
+                        NavigationLink { MatchDetailsView(game: next) } label: { MatchRow(game: next).sportPanel() }.buttonStyle(.plain)
                     }
-                    Text("Leaders de la semaine").font(.title2.bold())
-                    Text("Semaine civile en cours • statistiques des matchs terminés").font(.caption).foregroundStyle(.secondary)
-                    ForEach(["QB", "WR", "DB", "Rusher"], id: \.self) { position in
-                        PositionLeaders(position: position, players: players.filter { $0.clubID == club.id && $0.positions.contains(position) }, teams: teams, totals: weekly, games: clubGames, entries: entries)
+                    if finished.isEmpty {
+                        SportEmptyState(symbol: "flag.checkered", title: "Votre histoire reste à écrire", message: "Un premier match, des performances à partager. Vos résultats et vos leaders apparaîtront ici, à partir de vos vraies données.", actionTitle: "Planifier un match", action: { planning = true })
+                    } else {
+                        SportHeading(title: "Après le coup de sifflet", subtitle: "Résultats et performances de votre collectif")
+                        ForEach(Array(finished.prefix(3))) { game in
+                            LocalActivityCard(game: game, players: players, entries: entries, careerGames: clubGames)
+                        }
+                        if !positions.isEmpty {
+                            SportHeading(title: "Ils font la différence", subtitle: "Leaders de la semaine • matchs terminés")
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    ForEach(positions, id: \.self) { position in
+                                        PositionLeaders(position: position, players: players.filter { $0.clubID == club.id && $0.positions.contains(position) }, teams: teams, totals: weekly, games: clubGames, entries: entries)
+                                            .containerRelativeFrame(.horizontal, count: 6, span: 5, spacing: 12)
+                                    }
+                                }.padding(.bottom, 4)
+                            }
+                        }
                     }
-                    Text("Sur le terrain").font(.title2.bold())
-                    Text("Activités générées à partir des résultats locaux. Aucun partage entre comptes pour l’instant.").font(.caption).foregroundStyle(.secondary)
-                    if clubGames.filter(\.isFinished).isEmpty { EmptyHint(title: "L’histoire commence ici", subtitle: "Terminez un match pour voir son résultat et ses performances ici.") }
-                    ForEach(Array(clubGames.filter(\.isFinished).prefix(30))) { game in
-                        LocalActivityCard(game: game, players: players, entries: entries, careerGames: clubGames)
-                    }
-                }.padding()
+                }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 24)
             }
-            .background(Color(.systemGroupedBackground))
+            .background(SportTheme.background)
             .navigationTitle("Accueil")
-            .toolbar {
-                NavigationLink {
-                    BackupView()
-                } label: {
-                    Label("Sauvegarde", systemImage: "externaldrive")
-                }
-            }
+            .toolbar { Button { planning = true } label: { Label("Planifier", systemImage: "plus") } }
+            .sheet(isPresented: $planning) { MatchPlanningSheet(club: club) }
         }
+    }
+    private var brandHeader: some View {
+        HStack(alignment: .center, spacing: 14) {
+            SportAvatar(data: nil, name: club.name, size: 54)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("GAMESPLIT").font(.caption.bold()).tracking(3).foregroundStyle(.white.opacity(0.85))
+                Text(club.name).font(.title2.bold()).foregroundStyle(.white)
+                Text("Votre terrain. Votre histoire.").font(.caption).foregroundStyle(.white.opacity(0.85))
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "bolt.fill").font(.title2).foregroundStyle(SportTheme.orange).accessibilityHidden(true)
+        }.padding(22).frame(maxWidth: .infinity, alignment: .leading)
+            .background(LinearGradient(colors: [SportTheme.navy, SportTheme.electric], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 24))
     }
 }
 
@@ -70,37 +87,29 @@ struct PositionLeaders: View {
         default: return total.sacks
         }
     }
-    private func summary(_ total: PlayerTotals) -> String {
-        switch position {
-        case "QB": return "\(total.passTD) passes TD • \(total.passingYards) vg • \(total.thrownInterceptions) INT lancées"
-        case "WR": return "\(total.receivingYards) vg • \(total.receivingTD) TD • \(total.receptions) réc."
-        case "DB": return "\(total.interceptions) INT • \(total.tackles) plaqués"
-        default: return "\(total.sacks) sacs • \(total.tackles) plaqués"
-        }
-    }
     var body: some View {
-        let ranked = players.filter { (totals[$0.id]?.appearances ?? 0) > 0 }.sorted {
+        let ranked = players.filter { PerformanceEligibility.hasPerformance(totals[$0.id] ?? PlayerTotals(), position: position) }.sorted {
             let left = value(totals[$0.id] ?? PlayerTotals()), right = value(totals[$1.id] ?? PlayerTotals())
             return left == right ? $0.name < $1.name : left > right
         }
-        VStack(alignment: .leading, spacing: 12) {
-            PositionBadge(position: position)
-            if ranked.isEmpty { Text("Aucune performance cette semaine.").font(.caption).foregroundStyle(.secondary) }
-            ForEach(Array(ranked.prefix(3))) { player in
+        VStack(alignment: .leading, spacing: 14) {
+            HStack { PositionBadge(position: position); Spacer(); Image(systemName: "bolt.fill").foregroundStyle(SportTheme.performanceInk) }
+            ForEach(Array(ranked.prefix(2))) { player in
                 NavigationLink { PlayerDetailsView(player: player, games: games, entries: entries) } label: {
-                    HStack(spacing: 12) {
-                        SportAvatar(data: player.photoData, name: player.name, size: 44)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(player.name).font(.headline)
-                            Text(summary(totals[player.id] ?? PlayerTotals())).font(.caption).foregroundStyle(.secondary)
-                            Text(teams.filter { $0.clubID == player.clubID && $0.memberIDs.contains(player.id) }.map(\.name).joined(separator: " • "))
-                                .font(.caption2).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            SportAvatar(data: player.photoData, name: player.name, size: 44)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(player.name).font(.headline).foregroundStyle(.primary)
+                                Text(teams.filter { $0.clubID == player.clubID && $0.memberIDs.contains(player.id) }.map(\.name).joined(separator: " • "))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
-                        Spacer()
+                        PrimaryStats(position: position, totals: totals[player.id] ?? PlayerTotals())
                     }
                 }.buttonStyle(.plain)
             }
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(16).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+        }.sportPanel()
     }
 }
 
@@ -110,24 +119,37 @@ struct LocalActivityCard: View {
     let players: [Player]
     let entries: [StatEntry]
     let careerGames: [MatchGame]
+    private func newRecord(for player: Player) -> PerformanceRecord? {
+        let earlier = careerGames.filter { $0.isFinished && $0.date < game.date && $0.participants.contains(player.id) }
+        guard !earlier.isEmpty else { return nil }
+        let previous = Dictionary(uniqueKeysWithValues: PersonalRecords.best(playerID: player.id, games: earlier, entries: entries).map { ($0.id, $0.value) })
+        return PersonalRecords.best(playerID: player.id, games: [game], entries: entries).first { $0.value > (previous[$0.id] ?? 0) }
+    }
     var body: some View {
         let totals = Totals.byPlayer(games: [game], entries: entries)
-        let performers = players.filter { game.participants.contains($0.id) }.sorted {
+        let performers = players.filter { player in
+            game.participants.contains(player.id) && entries.contains { $0.matchID == game.id && $0.playerID == player.id && $0.value > 0 }
+        }.sorted {
             let left = totals[$0.id]?.contributionPoints ?? 0, right = totals[$1.id]?.contributionPoints ?? 0
             return left == right ? $0.name < $1.name : left > right
         }
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             NavigationLink { MatchDetailsView(game: game) } label: { MatchRow(game: game) }.buttonStyle(.plain)
             ForEach(Array(performers.prefix(2))) { player in
+                Divider()
                 NavigationLink { PlayerDetailsView(player: player, games: careerGames, entries: entries) } label: {
-                    HStack {
-                        SportAvatar(data: player.photoData, name: player.name, size: 32)
-                        Text(player.name).font(.subheadline.bold())
-                        Spacer()
-                        Text("\(totals[player.id]?.passTD ?? 0) passes TD • \(totals[player.id]?.touchdowns ?? 0) TD").font(.caption)
+                    HStack(alignment: .top, spacing: 12) {
+                        SportAvatar(data: player.photoData, name: player.name, size: 40)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(player.name).font(.subheadline.bold()).foregroundStyle(.primary)
+                            PrimaryStats(position: player.position, totals: totals[player.id] ?? PlayerTotals())
+                            if let record = newRecord(for: player) {
+                                Label("Record personnel : \(record.value) • \(record.kind.title)", systemImage: "bolt.fill").font(.caption.bold()).foregroundStyle(SportTheme.performanceInk)
+                            }
+                        }
                     }
                 }.buttonStyle(.plain)
             }
-        }.padding(16).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+        }.sportPanel()
     }
 }

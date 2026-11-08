@@ -6,34 +6,37 @@ import UIKit
 struct MatchesView: View {
     let club: Club
     @Query(sort: \MatchGame.date, order: .reverse) private var allGames: [MatchGame]
-    @Query(sort: \Season.createdAt, order: .reverse) private var allSeasons: [Season]
     @State private var creating = false
     @State private var statusFilter = "Tous"
-    private var seasons: [Season] { allSeasons.filter { $0.clubID == club.id } }
+    private var games: [MatchGame] { allGames.filter { $0.clubID == club.id } }
+    private var filtered: [MatchGame] { games.filter { statusFilter == "Tous" || (statusFilter == "Terminés") == $0.isFinished } }
     var body: some View {
         NavigationStack {
-            List {
-                Picker("Afficher", selection: $statusFilter) {
-                    Text("Tous").tag("Tous"); Text("À venir").tag("À venir"); Text("Terminés").tag("Terminés")
-                }.pickerStyle(.segmented)
-                ForEach(allGames.filter { $0.clubID == club.id && (statusFilter == "Tous" || (statusFilter == "Terminés") == $0.isFinished) }) { game in
-                    NavigationLink { MatchDetailsView(game: game) } label: { MatchRow(game: game) }
-                }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    SportHeading(title: "À chaque match, une histoire", subtitle: "Calendrier, résultats et performances de votre organisation.")
+                    if games.isEmpty {
+                        SportEmptyState(symbol: "sportscourt.fill", title: "Le terrain vous attend", message: "Planifiez un match entre amis ou une rencontre entre équipes.", actionTitle: "Planifier un match", action: { creating = true })
+                    } else {
+                        Picker("Afficher les matchs", selection: $statusFilter) {
+                            Text("Tous").tag("Tous"); Text("À venir").tag("À venir"); Text("Terminés").tag("Terminés")
+                        }.pickerStyle(.segmented)
+                        if filtered.isEmpty {
+                            SportEmptyState(symbol: "calendar", title: "Aucun match dans cette catégorie", message: "Changez le filtre ou planifiez une rencontre.", actionTitle: "Planifier un match", action: { creating = true })
+                        }
+                        ForEach(filtered) { game in
+                            NavigationLink { MatchDetailsView(game: game) } label: { MatchRow(game: game).sportPanel() }.buttonStyle(.plain)
+                        }
+                    }
+                }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 24)
             }
-            .overlay {
-                if allGames.filter({ $0.clubID == club.id }).isEmpty {
-                    EmptyHint(title: "Aucun match", subtitle: "Planifie ton premier match.")
-                }
-            }
+            .background(SportTheme.background)
             .navigationTitle("Matchs")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { NavigationLink("Importer CSV") { CalendarImportView(club: club) } }
-                ToolbarItem(placement: .topBarTrailing) { Button("Créer", systemImage: "plus") { creating = true } }
+                ToolbarItem(placement: .topBarLeading) { NavigationLink { CalendarImportView(club: club) } label: { Label("Importer CSV", systemImage: "square.and.arrow.down") } }
+                ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { Label("Planifier", systemImage: "plus") } }
             }
-            .sheet(isPresented: $creating) {
-                if let season = seasons.first { NewMatchView(club: club, season: season) }
-                else { NewSeasonView(clubID: club.id) }
-            }
+            .sheet(isPresented: $creating) { MatchPlanningSheet(club: club) }
         }
     }
 }
@@ -44,110 +47,125 @@ struct NewMatchView: View {
     let season: Season
     var initialTeamID: UUID? = nil
     @Environment(\.modelContext) private var context
-    @State private var saveError: String?
-    private func saveChanges() -> Bool {
-        do { try context.save(); return true }
-        catch { context.rollback(); saveError = "Sauvegarde impossible : \(error.localizedDescription)"; return false }
-    }
     @Environment(\.dismiss) private var dismiss
-    @Query private var allPlayers: [Player]
+    @Query(sort: \Player.name) private var allPlayers: [Player]
     @Query(sort: \Team.name) private var allTeams: [Team]
     @State private var selectedTeamID: UUID?
     @State private var opponentTeamID: UUID?
     @State private var opponentName = ""
-    @State private var initialized = false
-    private var teams: [Team] { allTeams.filter { $0.clubID == club.id } }
     @State private var date = Date()
     @State private var venue = ""
     @State private var costText = "0"
-    @State private var attending = Set<UUID>()
+    @State private var sides: [UUID: String] = [:]
+    @State private var initialized = false
+    @State private var saveError: String?
+    private var teams: [Team] { allTeams.filter { $0.clubID == club.id } }
     private var players: [Player] { allPlayers.filter { $0.clubID == club.id } }
+    private var home: Team? { teams.first { $0.id == selectedTeamID } }
+    private var away: Team? { teams.first { $0.id == opponentTeamID } }
+    private var isOfficial: Bool { selectedTeamID != nil }
+    private var proposed: (blue: Set<UUID>, red: Set<UUID>) {
+        if isOfficial {
+            return (Set(sides.filter { $0.value == "blue" }.map { $0.key }), Set(sides.filter { $0.value == "red" }.map { $0.key }))
+        }
+        return TeamsBalancer.split(players.filter { sides[$0.id] == "present" })
+    }
+    private var issue: String? {
+        if InputValidation.cost(costText) == nil { return "Saisissez un montant valide entre 0 et 1 000 000 $." }
+        let roster = proposed
+        return MatchValidation.issue(clubID: club.id, teamID: selectedTeamID, opponentTeamID: opponentTeamID, opponentName: opponentName,
+                                     blue: roster.blue, red: roster.red, teams: teams, players: players)
+    }
     var body: some View {
         NavigationStack {
             Form {
-                Section("Équipes") {
-                    Picker("Votre équipe (Bleus)", selection: $selectedTeamID) {
-                        Text("Match entre amis / équipes équilibrées").tag(UUID?.none)
+                Section("Rencontre") {
+                    Picker("Votre équipe", selection: $selectedTeamID) {
+                        Text("Récréatif • entre amis").tag(UUID?.none)
                         ForEach(teams) { Text($0.name).tag(Optional($0.id)) }
                     }
-                    if selectedTeamID != nil {
-                        Picker("Adversaire (Rouges)", selection: $opponentTeamID) {
-                            Text("Saisie manuelle").tag(UUID?.none)
+                    if isOfficial {
+                        Picker("Adversaire", selection: $opponentTeamID) {
+                            Text("Adversaire saisi manuellement").tag(UUID?.none)
                             ForEach(teams.filter { $0.id != selectedTeamID }) { Text($0.name).tag(Optional($0.id)) }
                         }
                         if opponentTeamID == nil { TextField("Nom de l’adversaire", text: $opponentName) }
-                        Text("Les présents de votre équipe seront Bleus, ceux de l’adversaire Rouges. Un joueur commun reste du côté de votre équipe.").font(.caption)
+                        Label("Match officiel • effectifs respectés", systemImage: "shield.checkered").font(.caption).foregroundStyle(SportTheme.accent)
+                        Text("Aucun équilibrage automatique. Vérifiez les participants de chaque équipe. Pour un adversaire manuel, ajoutez ses joueurs depuis Équipes → Gestion → Tous les joueurs.").font(.caption)
+                    } else {
+                        Label("Équipes équilibrées selon les OVR", systemImage: "arrow.left.arrow.right").font(.caption).foregroundStyle(SportTheme.accent)
                     }
                 }
-                Section("Partie") {
+                Section("Rendez-vous") {
                     DatePicker("Date et heure", selection: $date)
                     TextField("Terrain / lieu", text: $venue)
                     TextField("Coût total (CAD)", text: $costText).keyboardType(.decimalPad)
-                    if InputValidation.cost(costText) == nil {
-                        Text("Saisissez un montant entre 0 et 1 000 000 $, avec une virgule ou un point décimal.").font(.caption).foregroundStyle(.red)
-                    }
                 }
-                Section("Joueurs présents (\(attending.count))") {
-                    if players.isEmpty { Text("Ajoutez les joueurs depuis Équipes → Tous les joueurs.") }
-                    else if selectedTeamID == nil && attending.count < 2 { Text("Sélectionnez au moins deux participants.").font(.caption) }
+                Section("Participants") {
+                    if players.isEmpty { Text("Ajoutez vos joueurs depuis Équipes → Gestion → Tous les joueurs.") }
                     ForEach(players) { player in
-                        Toggle(player.name, isOn: Binding(
-                            get: { attending.contains(player.id) },
-                            set: { on in
-                                if on { attending.insert(player.id) } else { attending.remove(player.id) }
-                            }
-                        ))
+                        if isOfficial { officialPlayerPicker(player) }
+                        else {
+                            Toggle(player.name, isOn: Binding(get: { sides[player.id] == "present" }, set: { on in
+                                if on { sides[player.id] = "present" } else { sides.removeValue(forKey: player.id) }
+                            }))
+                        }
                     }
                 }
-                Section {
-                    Text(selectedTeamID == nil ? "Répartition automatique selon les overalls, ajustable ensuite." : "Les effectifs des équipes sont préremplis. Ajustez les présents et les côtés avant de saisir les statistiques.")
-                        .font(.caption).foregroundStyle(.secondary)
+                Section("Vérification") {
+                    let roster = proposed
+                    LabeledContent(home?.name ?? "Bleus", value: "\(roster.blue.count) présents")
+                    LabeledContent(away?.name ?? (opponentName.isEmpty ? "Rouges" : opponentName), value: "\(roster.red.count) présents")
+                    if let issue { Label(issue, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary) }
                 }
             }
-            .navigationTitle("Nouveau match")
+            .navigationTitle("Planifier un match")
             .onAppear {
                 guard !initialized else { return }; initialized = true
-                selectedTeamID = initialTeamID
-                if let team = teams.first(where: { $0.id == initialTeamID }) { attending = team.memberIDs }
+                selectedTeamID = initialTeamID; prefill()
             }
-            .onChange(of: selectedTeamID) { _, id in
-                if opponentTeamID == id { opponentTeamID = nil }
-                if let team = teams.first(where: { $0.id == id }) {
-                    attending = team.memberIDs.union(teams.first(where: { $0.id == opponentTeamID })?.memberIDs ?? [])
-                }
+            .onChange(of: selectedTeamID) { _, _ in
+                if selectedTeamID == opponentTeamID { opponentTeamID = nil }
+                if selectedTeamID == nil { opponentTeamID = nil; opponentName = "" }
+                prefill()
             }
-            .onChange(of: opponentTeamID) { _, id in
-                if let team = teams.first(where: { $0.id == selectedTeamID }) {
-                    attending = team.memberIDs.union(teams.first(where: { $0.id == id })?.memberIDs ?? [])
-                }
-            }
+            .onChange(of: opponentTeamID) { _, _ in prefill() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Annuler") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Créer") {
-                        guard let amount = InputValidation.cost(costText) else { return }
-                        let match = MatchGame(clubID: club.id, seasonID: season.id, date: date,
-                                              venue: venue, totalCost: max(0, amount))
-                        match.teamID = selectedTeamID; match.opponentTeamID = selectedTeamID == nil ? nil : opponentTeamID
-                        match.opponentName = selectedTeamID == nil ? "" : opponentName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let selected = players.filter { attending.contains($0.id) }
-                        if let home = teams.first(where: { $0.id == selectedTeamID }) {
-                            let away = teams.first(where: { $0.id == opponentTeamID })
-                            match.blueIDs = Set(selected.filter { home.memberIDs.contains($0.id) || !(away?.memberIDs.contains($0.id) ?? false) }.map(\.id))
-                            match.redIDs = Set(selected.map(\.id)).subtracting(match.blueIDs)
-                        } else {
-                            let split = TeamsBalancer.split(selected)
-                            match.blueIDs = split.blue; match.redIDs = split.red
-                        }
-                        context.insert(match); if saveChanges() { dismiss() }
-                    }.disabled((selectedTeamID == nil && attending.count < 2) || InputValidation.cost(costText) == nil || (selectedTeamID != nil && opponentTeamID == nil && opponentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
-                }
+                ToolbarItem(placement: .confirmationAction) { Button("Créer") { create() }.disabled(issue != nil) }
             }
         }
-        .alert("Erreur de sauvegarde", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+        .alert("Sauvegarde", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
             Button("OK", role: .cancel) { saveError = nil }
         } message: { Text(saveError ?? "") }
-
+    }
+    private func officialPlayerPicker(_ player: Player) -> some View {
+        Picker(player.name, selection: Binding(get: { sides[player.id] ?? "absent" }, set: { side in
+            if side == "absent" { sides.removeValue(forKey: player.id) } else { sides[player.id] = side }
+        })) {
+            Text("Absent").tag("absent")
+            if home?.memberIDs.contains(player.id) == true { Text(home?.name ?? "Votre équipe").tag("blue") }
+            if away == nil || away?.memberIDs.contains(player.id) == true { Text(away?.name ?? "Adversaire").tag("red") }
+        }
+    }
+    private func prefill() {
+        sides = [:]
+        if let home {
+            for player in players {
+                if home.memberIDs.contains(player.id) { sides[player.id] = "blue" }
+                else if away?.memberIDs.contains(player.id) == true { sides[player.id] = "red" }
+            }
+        }
+    }
+    private func create() {
+        guard issue == nil, let amount = InputValidation.cost(costText) else { saveError = issue; return }
+        let roster = proposed
+        let game = MatchGame(clubID: club.id, seasonID: season.id, date: date, venue: venue.trimmingCharacters(in: .whitespacesAndNewlines), totalCost: amount)
+        game.teamID = selectedTeamID; game.opponentTeamID = opponentTeamID
+        game.opponentName = opponentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        game.blueIDs = roster.blue; game.redIDs = roster.red
+        context.insert(game)
+        do { try context.save(); dismiss() } catch { context.rollback(); saveError = error.localizedDescription }
     }
 }
 
@@ -160,6 +178,7 @@ struct MatchDetailsView: View {
         do { try context.save(); return true }
         catch { context.rollback(); saveError = "Sauvegarde impossible : \(error.localizedDescription)"; return false }
     }
+    @Query private var allTeams: [Team]
     @Query private var allPlayers: [Player]
     @Query private var allEntries: [StatEntry]
     @State private var showingStat = false
@@ -190,7 +209,13 @@ struct MatchDetailsView: View {
                 }.padding(.vertical, 8)
                 Stepper("Points bleus : \(game.blueScore)", value: $game.blueScore, in: 0...500)
                 Stepper("Points rouges : \(game.redScore)", value: $game.redScore, in: 0...500)
-                Toggle("Match terminé", isOn: $game.isFinished)
+                Toggle("Match terminé", isOn: Binding(get: { game.isFinished }, set: { finished in
+                    if finished, !MatchValidation.canAutoBalance(game), let issue = MatchValidation.issue(clubID: game.clubID, teamID: game.teamID,
+                        opponentTeamID: game.opponentTeamID, opponentName: game.opponentName, blue: game.blueIDs, red: game.redIDs, teams: allTeams, players: allPlayers, checkCurrentMembership: false) {
+                        saveError = issue; return
+                    }
+                    game.isFinished = finished
+                }))
                 Text("Score officiel modifiable. À l’ajout d’un événement, vous choisissez d’ajouter ses points. Supprimer une stat ne change pas le score : corrigez-le ici si nécessaire.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -201,10 +226,15 @@ struct MatchDetailsView: View {
             }
             Section("Équipes • \(game.participants.count) joueurs") {
                 Button("Modifier les présents") { editingRoster = true }.disabled(game.isFinished || !matchEntries.isEmpty)
+                if MatchValidation.canAutoBalance(game) {
                 Button("Rééquilibrer les équipes") {
+                    guard MatchValidation.canAutoBalance(game) else { return }
                     let t = TeamsBalancer.split(participants)
                     game.blueIDs = t.blue; game.redIDs = t.red
                 }.disabled(game.isFinished || !matchEntries.isEmpty)
+                } else {
+                    Label("Match officiel : équilibrage automatique désactivé", systemImage: "lock.shield").font(.caption).foregroundStyle(.secondary)
+                }
                 Text("Votre équipe correspond aux Bleus, l’adversaire aux Rouges. Les équipes sont verrouillées après la première stat ou la fin du match. Supprimez les stats et rouvrez le match pour les corriger.").font(.caption)
                 ForEach(participants) { player in
                     HStack {
@@ -222,7 +252,7 @@ struct MatchDetailsView: View {
                         )) {
                             Text("Bleu").tag("blue")
                             Text("Rouge").tag("red")
-                        }.pickerStyle(.menu).disabled(game.isFinished || !matchEntries.isEmpty)
+                        }.pickerStyle(.menu).disabled(game.isFinished || !matchEntries.isEmpty || !MatchValidation.canAutoBalance(game))
                     }
                 }
             }
@@ -406,6 +436,9 @@ struct MatchInfoEditor: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Annuler") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Enregistrer") {
+                        if !MatchValidation.canAutoBalance(game), game.opponentTeamID == nil, opponent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            errorMessage = "Indiquez un nom pour l’adversaire."; return
+                        }
                         game.date = date; game.venue = venue.trimmingCharacters(in: .whitespacesAndNewlines)
                         game.opponentName = opponent.trimmingCharacters(in: .whitespacesAndNewlines)
                         do { try context.save(); dismiss() } catch { context.rollback(); errorMessage = error.localizedDescription }
@@ -426,6 +459,7 @@ struct MatchRosterEditor: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Player.name) private var allPlayers: [Player]
+    @Query private var teams: [Team]
     @Query private var entries: [StatEntry]
     @State private var blue = Set<UUID>()
     @State private var red = Set<UUID>()
@@ -453,6 +487,8 @@ struct MatchRosterEditor: View {
                     Button("Enregistrer") {
                         guard !game.isFinished, !entries.contains(where: { $0.matchID == game.id }),
                               game.paidIDs.isSubset(of: blue.union(red)) else { errorMessage = "Le match est verrouillé ou des paiements seraient perdus."; return }
+                        if let issue = MatchValidation.issue(clubID: game.clubID, teamID: game.teamID, opponentTeamID: game.opponentTeamID, opponentName: game.opponentName,
+                            blue: blue, red: red, teams: teams, players: allPlayers, requireRecreationalParticipants: false) { errorMessage = issue; return }
                         game.blueIDs = blue; game.redIDs = red
                         do { try context.save(); dismiss() } catch { context.rollback(); errorMessage = error.localizedDescription }
                     }

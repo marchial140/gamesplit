@@ -18,18 +18,25 @@ struct RootView: View {
         Group {
             if let club = clubs.first { ClubTabs(club: club) }
             else {
-                NavigationStack { VStack(spacing: 20) {
-                    Image(systemName: "flag.checkered.2.crossed").font(.system(size: 60)).foregroundStyle(.mint)
-                    Text("GameSplit").font(.largeTitle.bold())
-                    Text("Organise tes matchs entre amis, suis les statistiques et partage les coûts.")
-                        .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                    Button("Créer mon groupe") { showNewClub = true }.buttonStyle(.borderedProminent)
-                    NavigationLink("Restaurer une sauvegarde") { BackupView() }
-                }.padding(28) }
+                NavigationStack {
+                    ScrollView {
+                        VStack(spacing: 22) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                Image(systemName: "bolt.fill").font(.largeTitle).foregroundStyle(SportTheme.orange)
+                                Text("GAMESPLIT").font(.system(.largeTitle, design: .rounded).weight(.heavy)).foregroundStyle(.white)
+                                Text("Votre terrain. Votre histoire.").font(.title2.bold()).foregroundStyle(.white)
+                                Text("Le collectif, les performances et les souvenirs du flag football.").font(.subheadline).foregroundStyle(.white.opacity(0.85))
+                            }.padding(26).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(LinearGradient(colors: [SportTheme.navy, SportTheme.electric], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 26))
+                            SportEmptyState(symbol: "flag.checkered", title: "Prêts pour le premier match ?", message: "Créez votre organisation pour réunir vos joueurs et suivre vos performances. Tout reste sur cet appareil.", actionTitle: "Créer mon groupe", action: { showNewClub = true })
+                            NavigationLink { BackupView() } label: { Label("Restaurer une sauvegarde", systemImage: "externaldrive") }.buttonStyle(.bordered)
+                        }.padding(16).padding(.bottom, 24)
+                    }.background(SportTheme.background)
+                }
             }
         }
         .sheet(isPresented: $showNewClub) { NewClubView() }
-        .tint(Color(red: 0.0, green: 0.42, blue: 0.32))
+        .tint(SportTheme.accent)
         .environment(\.locale, Locale(identifier: "fr_CA"))
 
 
@@ -87,6 +94,7 @@ struct ClubTabs: View {
             TeamsView(club: club).tabItem { Label("Équipes", systemImage: "person.3.fill") }
             LocalProfileView(club: club).tabItem { Label("Profil", systemImage: "person.crop.circle") }
         }
+        .toolbarBackground(.visible, for: .tabBar)
     }
 }
 

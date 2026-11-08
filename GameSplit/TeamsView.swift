@@ -5,37 +5,76 @@ import SwiftData
 struct TeamsView: View {
     let club: Club
     @Query(sort: \Team.name) private var allTeams: [Team]
+    @Query private var allGames: [MatchGame]
     @State private var adding = false
     private var teams: [Team] { allTeams.filter { $0.clubID == club.id } }
     var body: some View {
         NavigationStack {
-            List {
-                Section {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    SportHeading(title: "Vos couleurs. Votre collectif.", subtitle: club.name)
+                    if teams.isEmpty {
+                        SportEmptyState(symbol: "person.3.fill", title: "Le collectif commence ici", message: "Créez votre équipe, ajoutez son logo et réunissez les joueurs.", actionTitle: "Créer une équipe", action: { adding = true })
+                    }
                     ForEach(teams) { team in
                         NavigationLink { TeamDetailsView(team: team, club: club) } label: {
-                            HStack(spacing: 14) {
-                                SportAvatar(data: team.logoData, name: team.name)
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(team.name).font(.headline)
-                                    Text("\(team.memberIDs.count) joueurs • \(team.captainIDs.count) capitaines")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                            }.padding(.vertical, 6)
-                        }
+                            TeamSummaryCard(team: team, games: allGames.filter { $0.clubID == club.id })
+                        }.buttonStyle(.plain)
                     }
-                    if teams.isEmpty { Text("Créez votre première équipe, puis ajoutez ses joueurs.").foregroundStyle(.secondary) }
-                } header: { Text("Vos équipes") }
-                Section("Organisation • \(club.name)") {
-                    NavigationLink("Tous les joueurs") { PlayersView(club: club) }
-                    NavigationLink("Coûts et paiements — gestion") { FinancesView(club: club) }
-                    NavigationLink("Sauvegarde locale") { BackupView() }
-                    Text("Sur cet appareil, le gérant dispose de toutes les commandes. Les capitaines sont des désignations locales ; les accès individuels nécessiteront des comptes vérifiés.").font(.caption).foregroundStyle(.secondary)
-                }
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 18) {
+                            NavigationLink { PlayersView(club: club) } label: { Label("Tous les joueurs", systemImage: "person.crop.rectangle.stack") }
+                            NavigationLink { FinancesView(club: club) } label: { Label("Coûts et paiements", systemImage: "dollarsign.circle") }
+                            NavigationLink { BackupView() } label: { Label("Sauvegarde locale", systemImage: "externaldrive") }
+                            Text("Gestion sur cet appareil. Les capitaines sont des désignations locales, sans connexion en ligne.").font(.caption).foregroundStyle(.secondary)
+                        }.padding(.top, 14)
+                    } label: { Label("Gestion", systemImage: "slider.horizontal.3").font(.subheadline.bold()).foregroundStyle(.secondary) }
+                    .sportPanel()
+                }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 24)
             }
+            .background(SportTheme.background)
             .navigationTitle("Équipes")
-            .toolbar { Button("Créer", systemImage: "plus") { adding = true } }
+            .toolbar { Button { adding = true } label: { Label("Créer", systemImage: "plus") } }
             .sheet(isPresented: $adding) { TeamEditorView(clubID: club.id) }
         }
+    }
+}
+
+@MainActor
+struct TeamSummaryCard: View {
+    let team: Team
+    let games: [MatchGame]
+    private var next: MatchGame? {
+        games.filter { !$0.isFinished && $0.date >= .now && ($0.teamID == team.id || $0.opponentTeamID == team.id) }.min { $0.date < $1.date }
+    }
+    var body: some View {
+        let summary = TeamRecordSummary.calculate(teamID: team.id, games: games)
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
+                SportAvatar(data: team.logoData, name: team.name, size: 60)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(team.name).font(.title3.bold()).foregroundStyle(.primary)
+                    Text("\(team.memberIDs.count) joueurs").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 18) {
+                LabelValue(label: "Victoires", value: "\(summary.wins)")
+                LabelValue(label: "Défaites", value: "\(summary.losses)")
+                LabelValue(label: "Nuls", value: "\(summary.ties)")
+            }.foregroundStyle(.primary)
+            Divider()
+            if let next {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("PROCHAIN MATCH").font(.caption2.bold()).foregroundStyle(.secondary)
+                    Label(next.date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
+                        .font(.caption.bold()).foregroundStyle(SportTheme.accent)
+                }
+            } else {
+                Label("Aucun match à venir", systemImage: "calendar").font(.caption).foregroundStyle(.secondary)
+            }
+        }.sportPanel()
     }
 }
 
@@ -170,8 +209,7 @@ struct TeamDetailsView: View {
         .toolbar { Button("Modifier") { editing = true } }
         .sheet(isPresented: $editing) { TeamEditorView(clubID: club.id, team: team) }
         .sheet(isPresented: $addingMatch) {
-            if let season = seasons.first(where: { $0.clubID == club.id }) { NewMatchView(club: club, season: season, initialTeamID: team.id) }
-            else { NavigationStack { NewSeasonView(clubID: club.id) } }
+            MatchPlanningSheet(club: club, initialTeamID: team.id)
         }
     }
 }
@@ -180,17 +218,50 @@ struct TeamDetailsView: View {
 struct MatchRow: View {
     let game: MatchGame
     @Query private var teams: [Team]
-    private var home: String { teams.first { $0.id == game.teamID }?.name ?? "Bleus" }
-    private var away: String { teams.first { $0.id == game.opponentTeamID }?.name ?? (game.opponentName.isEmpty ? "Rouges" : game.opponentName) }
+    private var home: Team? { teams.first { $0.id == game.teamID && $0.clubID == game.clubID } }
+    private var away: Team? { teams.first { $0.id == game.opponentTeamID && $0.clubID == game.clubID } }
+    private var homeName: String { home?.name ?? "Bleus" }
+    private var awayName: String { away?.name ?? (game.opponentName.isEmpty ? "Rouges" : game.opponentName) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(game.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top) {
+                Label(game.isFinished ? "TERMINÉ" : "À VENIR", systemImage: game.isFinished ? "checkmark.circle.fill" : "calendar")
+                    .font(.caption2.bold()).foregroundStyle(game.isFinished ? SportTheme.performanceInk : SportTheme.accent)
                 Spacer()
-                Text(game.isFinished ? "TERMINÉ" : "À VENIR").font(.caption2.bold()).foregroundStyle(SportTheme.accent)
+                Text(game.date.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(.secondary)
             }
-            Text("\(home)  \(game.blueScore) — \(game.redScore)  \(away)").font(.headline)
-            Text(game.venue.isEmpty ? "Lieu à confirmer" : game.venue).font(.caption).foregroundStyle(.secondary)
-        }.padding(.vertical, 8)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { homeIdentity; score; awayIdentity }
+                VStack(spacing: 12) {
+                    HStack(alignment: .top) { homeIdentity; awayIdentity }
+                    score
+                }
+            }
+            HStack(alignment: .top, spacing: 12) {
+                Label(game.date.formatted(date: .omitted, time: .shortened), systemImage: "clock")
+                Label(game.venue.isEmpty ? "Lieu à confirmer" : game.venue, systemImage: "mappin.and.ellipse")
+            }.font(.caption).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+    private var homeIdentity: some View {
+        VStack(spacing: 8) {
+            SportAvatar(data: home?.logoData, name: homeName, size: 48)
+            Text(homeName).font(.subheadline.bold()).foregroundStyle(.primary).multilineTextAlignment(.center)
+        }.frame(maxWidth: .infinity)
+    }
+    private var awayIdentity: some View {
+        VStack(spacing: 8) {
+            SportAvatar(data: away?.logoData, name: awayName, size: 48)
+            Text(awayName).font(.subheadline.bold()).foregroundStyle(.primary).multilineTextAlignment(.center)
+        }.frame(maxWidth: .infinity)
+    }
+    private var score: some View {
+        VStack(spacing: 4) {
+            Text(game.isFinished ? "\(game.blueScore) – \(game.redScore)" : "VS")
+                .font(.system(.title, design: .rounded).weight(.heavy)).monospacedDigit().foregroundStyle(.primary).fixedSize(horizontal: true, vertical: false)
+            Text(game.isFinished ? "SCORE FINAL" : "\(game.participants.count) PRÉSENTS")
+                .font(.caption2.bold()).foregroundStyle(.secondary)
+        }
     }
 }

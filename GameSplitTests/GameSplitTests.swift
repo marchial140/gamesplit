@@ -258,8 +258,11 @@ final class V11Tests: XCTestCase {
         let club = Club(name: "Amis"), team = Team(clubID: UUID(), name: "Éclairs")
         team.clubID = club.id
         let season = Season(clubID: club.id, name: "2027")
+        let homePlayer = Player(clubID: club.id, name: "Alex"), awayPlayer = Player(clubID: club.id, name: "Sam")
+        team.memberIDs = [homePlayer.id]
+        context.insert(homePlayer); context.insert(awayPlayer)
         context.insert(club); context.insert(team); context.insert(season); try context.save()
-        let rows = try CalendarCSV.parse("date,equipe,adversaire\n2027-06-12T19:00:00Z,Éclairs,Lynx\n2027-06-12T19:00:00Z,Éclairs,Lynx")
+        let rows = try CalendarCSV.parse("date,equipe,adversaire,bleus,rouges\n2027-06-12T19:00:00Z,Éclairs,Lynx,\(homePlayer.id),\(awayPlayer.id)\n2027-06-12T19:00:00Z,Éclairs,Lynx,\(homePlayer.id),\(awayPlayer.id)")
         let first = try CalendarImporter.run(rows: rows, clubID: club.id, seasonID: season.id, context: context)
         XCTAssertEqual(first.added, 1); XCTAssertEqual(first.duplicates, 1)
         let second = try CalendarImporter.run(rows: rows, clubID: club.id, seasonID: season.id, context: context)
@@ -267,5 +270,107 @@ final class V11Tests: XCTestCase {
         let invalid = try CalendarCSV.parse("date,equipe\n2027-08-12T19:00:00Z,Éclairs\n2027-08-13T19:00:00Z,Inconnue")
         XCTAssertThrowsError(try CalendarImporter.run(rows: invalid, clubID: club.id, seasonID: season.id, context: context))
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<MatchGame>()), 1)
+    }
+}
+
+@MainActor
+final class V111ValidationTests: XCTestCase {
+    private func fixture() -> (Club, Team, Team, Player, Player) {
+        let club = Club(name: "Flag Nord")
+        let home = Team(clubID: club.id, name: "Éclairs"), away = Team(clubID: club.id, name: "Lynx")
+        let alex = Player(clubID: club.id, name: "Alex", position: "QB"), sam = Player(clubID: club.id, name: "Sam", position: "DB")
+        home.memberIDs = [alex.id]; away.memberIDs = [sam.id]
+        return (club, home, away, alex, sam)
+    }
+    func testOfficialMatchRequiresBothCampsAndCorrectMembership() {
+        let (club, home, away, alex, sam) = fixture()
+        func issue(_ blue: Set<UUID>, _ red: Set<UUID>) -> String? {
+            MatchValidation.issue(clubID: club.id, teamID: home.id, opponentTeamID: away.id, opponentName: "", blue: blue, red: red, teams: [home, away], players: [alex, sam])
+        }
+        XCTAssertNil(issue([alex.id], [sam.id]))
+        XCTAssertNotNil(issue([], [sam.id]))
+        XCTAssertNotNil(issue([alex.id], []))
+        XCTAssertNotNil(issue([sam.id], [alex.id]))
+        XCTAssertNotNil(issue([alex.id], [alex.id]))
+    }
+    func testOfficialTeamsMustBeDistinctAndBelongToOrganization() {
+        let (club, home, away, alex, sam) = fixture()
+        func issue(_ homeID: UUID?, _ awayID: UUID?) -> String? {
+            MatchValidation.issue(clubID: club.id, teamID: homeID, opponentTeamID: awayID, opponentName: "", blue: [alex.id], red: [sam.id], teams: [home, away], players: [alex, sam])
+        }
+        XCTAssertNotNil(issue(home.id, home.id))
+        XCTAssertNotNil(issue(UUID(), away.id))
+        XCTAssertNotNil(issue(home.id, UUID()))
+        XCTAssertNotNil(issue(nil, away.id))
+        away.clubID = UUID()
+        XCTAssertNotNil(issue(home.id, away.id))
+    }
+    func testManualOpponentRequiresNameAndTrackedParticipants() {
+        let (club, home, _, alex, sam) = fixture()
+        func issue(_ name: String, _ red: Set<UUID>) -> String? {
+            MatchValidation.issue(clubID: club.id, teamID: home.id, opponentTeamID: nil, opponentName: name, blue: [alex.id], red: red, teams: [home], players: [alex, sam])
+        }
+        XCTAssertNil(issue("Invités", [sam.id]))
+        XCTAssertNotNil(issue(" \n ", [sam.id]))
+        XCTAssertNotNil(issue("Invités", []))
+        XCTAssertNotNil(issue("Invités", [UUID()]))
+        sam.clubID = UUID()
+        XCTAssertNotNil(issue("Invités", [sam.id]))
+    }
+    func testBalancingRemainsRecreationalAndDoesNotMutateOfficialRecords() {
+        let (club, home, away, alex, sam) = fixture()
+        let game = MatchGame(clubID: club.id, seasonID: UUID(), date: .now, venue: "Parc", totalCost: 40)
+        game.blueIDs = [alex.id]; game.redIDs = [sam.id]; game.paidIDs = [alex.id]; game.blueScore = 18
+        XCTAssertTrue(MatchValidation.canAutoBalance(game))
+        game.teamID = home.id; game.opponentTeamID = away.id
+        XCTAssertFalse(MatchValidation.canAutoBalance(game))
+        XCTAssertNil(MatchValidation.issue(clubID: club.id, teamID: game.teamID, opponentTeamID: game.opponentTeamID, opponentName: "", blue: game.blueIDs, red: game.redIDs, teams: [home, away], players: [alex, sam]))
+        XCTAssertEqual(game.blueIDs, [alex.id]); XCTAssertEqual(game.redIDs, [sam.id])
+        XCTAssertEqual(game.blueScore, 18); XCTAssertEqual(game.collected, 20)
+        XCTAssertEqual(game.paidIDs, [alex.id])
+        // Leaving an organization team later must not invalidate the stored match sides.
+        home.memberIDs = []; away.memberIDs = []
+        XCTAssertNil(MatchValidation.issue(clubID: club.id, teamID: game.teamID, opponentTeamID: game.opponentTeamID, opponentName: "", blue: game.blueIDs, red: game.redIDs, teams: [home, away], players: [alex, sam], checkCurrentMembership: false))
+        XCTAssertNil(MatchValidation.issue(clubID: club.id, teamID: nil, opponentTeamID: nil, opponentName: "", blue: [], red: [], teams: [], players: [], requireRecreationalParticipants: false))
+        XCTAssertNotNil(MatchValidation.issue(clubID: club.id, teamID: nil, opponentTeamID: nil, opponentName: "", blue: [alex.id], red: [], teams: [], players: [alex]))
+    }
+    func testOfficialCSVWithoutParticipantsFailsBeforeAnyInsertion() throws {
+        let (club, home, _, alex, _) = fixture()
+        let container = try ModelContainer(for: Club.self, Season.self, Player.self, MatchGame.self, StatEntry.self, Team.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = ModelContext(container)
+        let season = Season(clubID: club.id, name: "2027")
+        context.insert(club); context.insert(home); context.insert(alex); context.insert(season); try context.save()
+        let rows = try CalendarCSV.parse("date,equipe,adversaire\n2027-06-12T19:00:00Z,,Amis\n2027-06-13T19:00:00Z,Éclairs,Lynx")
+        XCTAssertThrowsError(try CalendarImporter.run(rows: rows, clubID: club.id, seasonID: season.id, context: context))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MatchGame>()), 0)
+    }
+    func testCSVRejectsMalformedParticipantIDs() {
+        XCTAssertThrowsError(try CalendarCSV.parse("date,bleus\n2027-06-12T19:00:00Z,pas-un-uuid"))
+    }
+    func testEmptyLeadersRequireCompletedGamesAndPositionStats() {
+        var totals = PlayerTotals(); totals.passTD = 3
+        XCTAssertFalse(PerformanceEligibility.hasPerformance(totals, position: "QB"))
+        totals.appearances = 1
+        XCTAssertTrue(PerformanceEligibility.hasPerformance(totals, position: "QB"))
+        XCTAssertFalse(PerformanceEligibility.hasPerformance(totals, position: "DB"))
+        totals.tackles = 2
+        XCTAssertTrue(PerformanceEligibility.hasPerformance(totals, position: "DB"))
+        XCTAssertTrue(PerformanceEligibility.hasPerformance(totals, position: "Rusher"))
+    }
+    func testPersonalRecordsUseFinishedGamesAndCurrentEntries() {
+        let (club, _, _, alex, _) = fixture()
+        let finished = MatchGame(clubID: club.id, seasonID: UUID(), date: .now, venue: "")
+        finished.blueIDs = [alex.id]; finished.isFinished = true
+        let future = MatchGame(clubID: club.id, seasonID: finished.seasonID, date: .now, venue: "")
+        future.blueIDs = [alex.id]
+        let first = FootballEvents.make(game: finished, kind: .passingYards, playerID: alex.id, value: 100)[0]
+        let second = FootballEvents.make(game: finished, kind: .passingYards, playerID: alex.id, value: 80)[0]
+        let unplayed = FootballEvents.make(game: future, kind: .passingYards, playerID: alex.id, value: 900)[0]
+        var records = PersonalRecords.best(playerID: alex.id, games: [finished, future], entries: [first, second, unplayed])
+        XCTAssertEqual(records.first { $0.kind == .passingYards }?.value, 180)
+        first.value = 50
+        records = PersonalRecords.best(playerID: alex.id, games: [finished, future], entries: [first, unplayed])
+        XCTAssertEqual(records.first { $0.kind == .passingYards }?.value, 50)
+        XCTAssertTrue(PersonalRecords.best(playerID: alex.id, games: [finished], entries: []).isEmpty)
     }
 }

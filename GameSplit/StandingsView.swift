@@ -16,11 +16,12 @@ struct StandingsView: View {
     private var players: [Player] { allPlayers.filter { $0.clubID == club.id && (positionFilter == "Toutes" || $0.positions.contains(positionFilter)) } }
     private var seasons: [Season] { allSeasons.filter { $0.clubID == club.id } }
     private var games: [MatchGame] {
-        allGames.filter { $0.clubID == club.id && (selectedSeason == nil || $0.seasonID == selectedSeason) }
+        allGames.filter { $0.clubID == club.id && $0.isFinished && (selectedSeason == nil || $0.seasonID == selectedSeason) }
     }
     private var ranks: [(player: Player, stats: PlayerTotals)] {
         let totals = Totals.byPlayer(games: games, entries: allEntries)
         return players.map { (player: $0, stats: totals[$0.id] ?? PlayerTotals()) }
+            .filter { PerformanceEligibility.hasPerformance($0.stats) }
             .sorted {
                 if metric.value($0.stats) != metric.value($1.stats) {
                     return metric == .thrownInterceptions ? metric.value($0.stats) < metric.value($1.stats) : metric.value($0.stats) > metric.value($1.stats)
@@ -35,65 +36,109 @@ struct StandingsView: View {
         }.joined(separator: "\n")
         return "🏈 GameSplit — \(club.name) — \(seasonName)\n\(lines)"
     }
+    @State private var planning = false
     var body: some View {
         let ranked = ranks
         NavigationStack {
-            List {
-                Section {
-                    Picker("Période", selection: $selectedSeason) {
-                        Text("Toutes les saisons").tag(UUID?.none)
-                        ForEach(seasons) { season in Text(season.name).tag(Optional(season.id)) }
-                    }
-                    Button { showingNewSeason = true } label: { Label("Créer une saison", systemImage: "plus.circle") }
-                }
-                Section {
-                    Picker("Position", selection: $positionFilter) {
-                        Text("Toutes").tag("Toutes")
-                        ForEach(Position.allCases) { Text($0.rawValue).tag($0.rawValue) }
-                    }
-                    Picker("Classer par", selection: $metric) {
-                        ForEach(RankingMetric.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                }
-                Section("Classement — \(metric.rawValue)") {
-                    if ranked.isEmpty { Text("Aucun joueur pour l'instant.").foregroundStyle(.secondary) }
-                    ForEach(ranked.indices, id: \.self) { i in
-                        let item = ranked[i]
-                        HStack(spacing: 12) {
-                            SportAvatar(data: item.player.photoData, name: item.player.name, size: 36)
-                            Text("\(i + 1)").font(.headline).foregroundStyle(i == 0 ? Color.orange : Color.secondary).frame(width: 26)
-                            VStack(alignment: .leading) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    SportHeading(title: "Les performances parlent", subtitle: "Matchs terminés • statistiques réellement enregistrées")
+                    filters
+                    if ranked.isEmpty {
+                        SportEmptyState(symbol: "trophy", title: "Le classement vous attend", message: "Aucun joueur avec un match terminé pour ces filtres. Enregistrez un résultat ou changez la période.", actionTitle: "Planifier un match", action: { planning = true })
+                    } else {
+                        SportHeading(title: "Le podium", subtitle: metric.rawValue)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 12)], spacing: 12) {
+                            ForEach(0..<min(3, ranked.count), id: \.self) { index in
+                                let item = ranked[index]
                                 NavigationLink {
                                     PlayerDetailsView(player: item.player, games: allGames.filter { $0.clubID == club.id }, entries: allEntries)
-                                } label: { Text(item.player.name).font(.headline) }
-                                Text("\(item.player.position) • \(item.player.overall) OVR")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            VStack(alignment: .trailing) {
-                                Text("\(metric.value(item.stats))").font(.headline).monospacedDigit()
-                                Text("\(item.stats.touchdowns) TD • \(item.stats.interceptions) INT")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                } label: {
+                                    PodiumCard(player: item.player, stats: item.stats, rank: index + 1, metric: metric)
+                                }.buttonStyle(.plain)
                             }
                         }
+                        SportHeading(title: "Dans le détail")
+                        VStack(spacing: 16) {
+                            ForEach(ranked.indices, id: \.self) { index in
+                                let item = ranked[index]
+                                NavigationLink {
+                                    PlayerDetailsView(player: item.player, games: allGames.filter { $0.clubID == club.id }, entries: allEntries)
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Text("\(index + 1)").font(.headline.monospacedDigit()).foregroundStyle(.secondary).frame(minWidth: 22)
+                                        SportAvatar(data: item.player.photoData, name: item.player.name, size: 42)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(item.player.name).font(.headline).foregroundStyle(.primary)
+                                            Text("\(item.player.positionLabel) • \(item.player.overall) OVR").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer(minLength: 0)
+                                        Text("\(metric.value(item.stats))").font(.title3.bold().monospacedDigit()).foregroundStyle(SportTheme.accent)
+                                    }
+                                }.buttonStyle(.plain)
+                                if index < ranked.count - 1 { Divider() }
+                            }
+                        }.sportPanel()
+                        ShareLink(item: textLeaderboard) { Label("Partager le classement", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity) }.buttonStyle(.bordered)
                     }
-                }
-                Section("Règles de calcul") {
-                    Text("TD marqués : 6 points • Passe TD : \(ContributionRules.passingTouchdown) points • Interception défensive : 2 points • Conversion : 1 point. Ce classement ludique n'est pas le score officiel des matchs.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Section {
-                    ShareLink(item: textLeaderboard) {
-                        Label("Partager le classement", systemImage: "square.and.arrow.up")
-                    }
-                }
+                    Text("Contribution GameSplit : TD marqué ×6, passe TD ×\(ContributionRules.passingTouchdown), interception défensive ×2, conversion ×1. Indicateur ludique, distinct du score réel.").font(.caption).foregroundStyle(.secondary)
+                }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 24)
             }
+            .background(SportTheme.background)
             .navigationTitle("Classements")
+            .toolbar { Button { showingNewSeason = true } label: { Label("Nouvelle saison", systemImage: "calendar.badge.plus") } }
             .onAppear { if !initialized { selectedSeason = seasons.first?.id; initialized = true } }
             .sheet(isPresented: $showingNewSeason, onDismiss: { selectedSeason = seasons.first?.id }) { NewSeasonView(clubID: club.id) }
+            .sheet(isPresented: $planning) { MatchPlanningSheet(club: club) }
         }
+    }
+    private var filters: some View {
+        VStack(spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack { seasonPicker; positionPicker }
+                VStack(alignment: .leading) { seasonPicker; positionPicker }
+            }
+            Picker("Classer par", selection: $metric) {
+                ForEach(RankingMetric.allCases) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.menu).frame(maxWidth: .infinity, alignment: .leading)
+        }.foregroundStyle(.primary).sportPanel()
+    }
+    private var seasonPicker: some View {
+        Picker("Période", selection: $selectedSeason) {
+            Text("Carrière").tag(UUID?.none)
+            ForEach(seasons) { Text($0.name).tag(Optional($0.id)) }
+        }.pickerStyle(.menu)
+    }
+    private var positionPicker: some View {
+        Picker("Position", selection: $positionFilter) {
+            Text("Toutes").tag("Toutes")
+            ForEach(Position.allCases) { Text($0.rawValue).tag($0.rawValue) }
+        }.pickerStyle(.menu)
+    }
+}
 
-
+@MainActor
+struct PodiumCard: View {
+    let player: Player
+    let stats: PlayerTotals
+    let rank: Int
+    let metric: RankingMetric
+    @Query private var teams: [Team]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("\(rank)", systemImage: rank == 1 ? "crown.fill" : "medal.fill").font(.headline).foregroundStyle(SportTheme.performanceInk)
+                Spacer(minLength: 0)
+                Text("\(player.overall) OVR").font(.caption.bold()).foregroundStyle(.secondary)
+            }
+            SportAvatar(data: player.photoData, name: player.name, size: 64)
+            Text(player.name).font(.headline).foregroundStyle(.primary)
+            Text(player.positionLabel).font(.caption.bold()).foregroundStyle(SportTheme.accent)
+            Text(teams.filter { $0.clubID == player.clubID && $0.memberIDs.contains(player.id) }.map(\.name).joined(separator: " • "))
+                .font(.caption).foregroundStyle(.secondary)
+            Text("\(metric.value(stats))").font(.system(.largeTitle, design: .rounded).weight(.heavy)).foregroundStyle(SportTheme.performanceInk)
+            PrimaryStats(position: player.position, totals: stats)
+        }.frame(maxWidth: .infinity, alignment: .leading).sportPanel()
     }
 }
 

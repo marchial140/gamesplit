@@ -349,3 +349,69 @@ struct TeamRecordSummary {
         return result
     }
 }
+
+/// Shared by creation, roster edits and CSV import; never mutates historical records.
+enum MatchValidation {
+    static func isOfficial(teamID: UUID?, opponentTeamID: UUID?) -> Bool {
+        teamID != nil || opponentTeamID != nil
+    }
+    static func canAutoBalance(_ game: MatchGame) -> Bool {
+        !isOfficial(teamID: game.teamID, opponentTeamID: game.opponentTeamID)
+    }
+    static func issue(clubID: UUID, teamID: UUID?, opponentTeamID: UUID?, opponentName: String,
+                      blue: Set<UUID>, red: Set<UUID>, teams: [Team], players: [Player],
+                      requireRecreationalParticipants: Bool = true, checkCurrentMembership: Bool = true) -> String? {
+        let validPlayers = Set(players.filter { $0.clubID == clubID }.map(\.id))
+        guard blue.isDisjoint(with: red) else { return "Un joueur ne peut pas être présent dans les deux camps." }
+        guard blue.union(red).isSubset(of: validPlayers) else { return "Certains participants ne font pas partie de cette organisation." }
+        guard isOfficial(teamID: teamID, opponentTeamID: opponentTeamID) else {
+            return requireRecreationalParticipants && (blue.isEmpty || red.isEmpty) ? "Sélectionnez au moins un joueur dans chaque camp." : nil
+        }
+        guard let teamID, let home = teams.first(where: { $0.id == teamID && $0.clubID == clubID && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return "Choisissez une équipe valide pour ce match officiel." }
+        if let opponentTeamID {
+            guard teamID != opponentTeamID else { return "Une équipe ne peut pas jouer contre elle-même." }
+            guard let away = teams.first(where: { $0.id == opponentTeamID && $0.clubID == clubID && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return "L’équipe adverse n’est pas valide." }
+            guard !checkCurrentMembership || red.isSubset(of: away.memberIDs) else { return "Les joueurs adverses doivent appartenir à l’équipe adverse." }
+        } else if opponentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Indiquez le nom de l’adversaire ou choisissez une équipe."
+        }
+        guard !checkCurrentMembership || blue.isSubset(of: home.memberIDs) else { return "Les joueurs de votre camp doivent appartenir à votre équipe." }
+        guard !blue.isEmpty, !red.isEmpty else { return "Un match officiel exige au moins un participant dans chaque camp. Ajoutez les joueurs adverses à l’effectif si nécessaire." }
+        return nil
+    }
+}
+
+/// Rankings never turn registered players without completed games into leaders.
+enum PerformanceEligibility {
+    static func hasPerformance(_ totals: PlayerTotals, position: String? = nil) -> Bool {
+        guard totals.appearances > 0 else { return false }
+        switch position {
+        case "QB": return totals.passTD > 0 || totals.passingYards > 0 || totals.thrownInterceptions > 0
+        case "WR": return totals.receivingTD > 0 || totals.receivingYards > 0 || totals.receptions > 0
+        case "DB": return totals.interceptions > 0 || totals.tackles > 0
+        case "Rusher": return totals.sacks > 0 || totals.tackles > 0
+        default: return true
+        }
+    }
+}
+
+struct PerformanceRecord: Identifiable {
+    let kind: StatKind
+    let value: Int
+    var id: String { kind.rawValue }
+}
+
+enum PersonalRecords {
+    static func best(playerID: UUID, games: [MatchGame], entries: [StatEntry]) -> [PerformanceRecord] {
+        let ids = Set(games.filter { $0.isFinished && $0.participants.contains(playerID) }.map(\.id))
+        var byGame: [UUID: [String: Int]] = [:]
+        for entry in entries where entry.playerID == playerID && ids.contains(entry.matchID) {
+            byGame[entry.matchID, default: [:]][entry.kind, default: 0] += entry.value
+        }
+        let kinds: [StatKind] = [.passTD, .passingYards, .receivingTD, .receivingYards, .rushingTD, .interception, .tackle, .sack]
+        return kinds.compactMap { kind in
+            let best = byGame.values.map { $0[kind.rawValue] ?? 0 }.max() ?? 0
+            return best > 0 ? PerformanceRecord(kind: kind, value: best) : nil
+        }
+    }
+}
